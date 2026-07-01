@@ -5,9 +5,11 @@
 //! Usage: previewer-native <demo.dem> <map.glb>
 //!   assets are loaded relative to the `assets/` dir next to the binary.
 //!
-//! Controls: RMB hold = mouselook + WASD/QE fly · Space = play/pause · ←/→ seek 50 ·
-//!           ,/. step 1 tick · Shift = fly faster · Esc = quit
+//! Controls: RMB hold = mouselook · WASD/RF fly · Space = play/pause · ←/→ seek 50 ·
+//!           ,/. step 1 tick · +/- fly speed · B = toggle AABBs · Esc = quit
+//! Campath:  K = add keyframe here · L = delete last · P = follow path · F5 = export
 
+mod campath;
 mod demo;
 
 use std::f32::consts::FRAC_PI_2;
@@ -53,6 +55,17 @@ struct DemoRes(demo::DemoData);
 #[derive(Resource)]
 struct ShowAabb(bool);
 
+/// The campath being built: keyframes (Source Z-up), interp mode, and the compiled
+/// spline (rebuilt whenever `dirty`). `following` slaves the camera to the path.
+#[derive(Resource, Default)]
+struct Campath {
+    keyframes: Vec<campath::Keyframe>,
+    interp: campath::CampathInterp,
+    compiled: Option<campath::CompiledCampath>,
+    dirty: bool,
+    following: bool,
+}
+
 #[derive(Resource)]
 struct Playback {
     tick: f32,
@@ -92,23 +105,17 @@ fn class_name(class: u8) -> Option<&'static str> {
     })
 }
 
-/// Independently-rotatable parent for the map mesh, so calibration can align the map
-/// to the players without moving the players.
+/// Parent node holding the map mesh at its calibrated orientation.
 #[derive(Component)]
 struct MapRoot;
 
-#[derive(Resource)]
-struct MapRot(Quat);
-
-/// Map handedness. The demo's team labels are authoritative and our player transform is
-/// a pure rotation, so teams are correct *unless* the map GLB was mirror-converted.
-/// Toggle with M to test against a known-correct render (dribble.tf).
-#[derive(Resource)]
-struct MapMirror(bool);
-
-/// Constant yaw offset applied to every player model (radians). Calibrate with [ and ].
+/// Constant yaw offset applied to every player model (radians).
 #[derive(Resource)]
 struct PlayerYaw(f32);
+
+/// Path to the loaded demo, used to name exported campath files.
+#[derive(Resource)]
+struct DemoPath(String);
 
 #[derive(Component, Default)]
 struct FlyCam {
@@ -153,6 +160,8 @@ fn main() -> anyhow::Result<()> {
             playing: false,
         })
         .insert_resource(ShowAabb(true))
+        .insert_resource(Campath::default())
+        .insert_resource(DemoPath(demo_path.clone()))
         .insert_resource(MapAssetPath(map_asset))
         .insert_resource(DemoRes(data))
         .add_systems(Startup, setup)
@@ -163,11 +172,14 @@ fn main() -> anyhow::Result<()> {
                 advance_playback,
                 update_players,
                 draw_player_aabb,
+                campath_input,
+                campath_recompile,
+                campath_playback,
+                draw_campath,
                 clone_player_materials,
                 fade_dead_players,
                 fly_camera,
                 report_fps,
-                calibrate_map,
             )
                 .chain(),
         )
@@ -205,11 +217,8 @@ fn setup(
     // Calibrated on artix: +90° about X cancels the world root's -90° for the map
     // (the map GLB is already Y-up; only the players needed the Hammer->Y-up rotation).
     let map_rot = Quat::from_rotation_x(FRAC_PI_2);
-    commands.insert_resource(MapRot(map_rot));
-    commands.insert_resource(MapMirror(false));
 
     commands.entity(root).with_children(|parent| {
-        // Map lives under its own rotatable node (calibrate with U/J/I/K/O/L, M mirror).
         parent
             .spawn((
                 SpatialBundle::from_transform(Transform::from_rotation(map_rot)),
@@ -289,65 +298,6 @@ fn setup(
     });
 }
 
-/// Live map-orientation calibration: rotate the map in 90° steps to find the transform
-/// that lines it up with the players (which are already correct). U/J = ±X, I/K = ±Y,
-/// O/L = ±Z. Prints the resulting euler + quaternion so the final value can be baked in.
-fn calibrate_map(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut rot: ResMut<MapRot>,
-    mut mirror: ResMut<MapMirror>,
-    mut player_yaw: ResMut<PlayerYaw>,
-    mut q: Query<&mut Transform, With<MapRoot>>,
-) {
-    // Player yaw offset: [ / ] rotate every model ±90°.
-    if keys.just_pressed(KeyCode::BracketLeft) {
-        player_yaw.0 -= FRAC_PI_2;
-        eprintln!("[spike] player yaw offset: {:.0}°", player_yaw.0.to_degrees());
-    }
-    if keys.just_pressed(KeyCode::BracketRight) {
-        player_yaw.0 += FRAC_PI_2;
-        eprintln!("[spike] player yaw offset: {:.0}°", player_yaw.0.to_degrees());
-    }
-
-    let step = FRAC_PI_2;
-    let mut changed = true;
-    if keys.just_pressed(KeyCode::KeyU) {
-        rot.0 = (Quat::from_rotation_x(step) * rot.0).normalize();
-    } else if keys.just_pressed(KeyCode::KeyJ) {
-        rot.0 = (Quat::from_rotation_x(-step) * rot.0).normalize();
-    } else if keys.just_pressed(KeyCode::KeyI) {
-        rot.0 = (Quat::from_rotation_y(step) * rot.0).normalize();
-    } else if keys.just_pressed(KeyCode::KeyK) {
-        rot.0 = (Quat::from_rotation_y(-step) * rot.0).normalize();
-    } else if keys.just_pressed(KeyCode::KeyO) {
-        rot.0 = (Quat::from_rotation_z(step) * rot.0).normalize();
-    } else if keys.just_pressed(KeyCode::KeyL) {
-        rot.0 = (Quat::from_rotation_z(-step) * rot.0).normalize();
-    } else if keys.just_pressed(KeyCode::KeyM) {
-        mirror.0 = !mirror.0;
-    } else {
-        changed = false;
-    }
-    if !changed {
-        return;
-    }
-
-    // Mirror via a negative X scale (flips handedness across the YZ plane).
-    let scale = Vec3::new(if mirror.0 { -1.0 } else { 1.0 }, 1.0, 1.0);
-    if let Ok(mut tf) = q.get_single_mut() {
-        *tf = Transform::from_rotation(rot.0).with_scale(scale);
-    }
-    let (ry, rx, rz) = rot.0.to_euler(EulerRot::YXZ);
-    eprintln!(
-        "[spike] map rot: euler(x={:.0}° y={:.0}° z={:.0}°) mirror={} quat={:?}",
-        rx.to_degrees(),
-        ry.to_degrees(),
-        rz.to_degrees(),
-        mirror.0,
-        rot.0
-    );
-}
-
 /// FPS in the window title (bevy_ui is disabled, so no on-screen text) + a stderr line
 /// each second, both so you can read the number that answers the whole spike.
 fn report_fps(
@@ -378,10 +328,174 @@ fn report_fps(
     eprintln!("[spike] {:.1} fps  tick {}", fps, pb.tick as u32);
 }
 
+// Rotations between Source/Hammer Z-up (where campath data lives, matching the web
+// app + HLAE) and bevy's Y-up world. The camera lives directly in bevy world, so we
+// convert its pose at capture (world->hammer) and at playback (hammer->world).
+fn hammer_to_world_quat() -> Quat {
+    Quat::from_rotation_x(-FRAC_PI_2)
+}
+fn world_to_hammer_quat() -> Quat {
+    Quat::from_rotation_x(FRAC_PI_2)
+}
+
 /// Hammer coords -> engine world (matches the -90°-about-X root applied to children).
 fn hammer_to_world(p: [f32; 3]) -> Vec3 {
-    let q = Quat::from_rotation_x(-FRAC_PI_2);
-    q * Vec3::new(p[0], p[1], p[2])
+    hammer_to_world_quat() * Vec3::new(p[0], p[1], p[2])
+}
+
+/// K add keyframe · L delete highest-tick · P follow · F5 export XML+VDM.
+fn campath_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    pb: Res<Playback>,
+    demo_res: Res<DemoRes>,
+    demo_path: Res<DemoPath>,
+    mut path: ResMut<Campath>,
+    cam_q: Query<(&Transform, &Projection), With<FlyCam>>,
+) {
+    if keys.just_pressed(KeyCode::KeyK) {
+        if let Ok((tf, proj)) = cam_q.get_single() {
+            let tick = pb.tick.round() as u32;
+            let inv = world_to_hammer_quat();
+            let pos = inv * tf.translation;
+            let q = inv * tf.rotation;
+            let fov = match proj {
+                Projection::Perspective(p) => p.fov.to_degrees(),
+                _ => DEFAULT_FOV.to_degrees(),
+            };
+            let kf = campath::Keyframe {
+                tick,
+                position: [pos.x, pos.y, pos.z],
+                quaternion: [q.x, q.y, q.z, q.w],
+                fov,
+            };
+            // One keyframe per tick: replace if this tick already has one.
+            if let Some(i) = path.keyframes.iter().position(|k| k.tick == tick) {
+                path.keyframes[i] = kf;
+            } else {
+                path.keyframes.push(kf);
+                path.keyframes.sort_by_key(|k| k.tick);
+            }
+            path.dirty = true;
+            eprintln!(
+                "[campath] keyframe @ tick {tick} (total {})",
+                path.keyframes.len()
+            );
+        }
+    }
+
+    if keys.just_pressed(KeyCode::KeyL) {
+        // Vec is tick-sorted, so pop removes the highest-tick keyframe.
+        if let Some(k) = path.keyframes.pop() {
+            path.dirty = true;
+            eprintln!(
+                "[campath] removed keyframe @ tick {} ({} left)",
+                k.tick,
+                path.keyframes.len()
+            );
+        }
+    }
+
+    if keys.just_pressed(KeyCode::KeyP) {
+        path.following = !path.following;
+        eprintln!(
+            "[campath] follow {}",
+            if path.following { "ON" } else { "OFF" }
+        );
+    }
+
+    if keys.just_pressed(KeyCode::F5) {
+        if path.keyframes.len() < 2 {
+            eprintln!("[campath] need >= 2 keyframes to export");
+        } else {
+            let stem = std::path::Path::new(&demo_path.0)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("campath");
+            let xml_name = format!("{stem}_campath.xml");
+            let vdm_name = format!("{stem}.vdm");
+            let xml = campath::to_hlae_campath_xml(
+                &path.keyframes,
+                &path.interp,
+                demo_res.0.interval_per_tick,
+            );
+            let vdm = campath::to_vdm(&path.keyframes, &xml_name);
+            let cwd = std::env::current_dir().unwrap_or_default();
+            match (
+                std::fs::write(&xml_name, xml),
+                std::fs::write(&vdm_name, vdm),
+            ) {
+                (Ok(_), Ok(_)) => eprintln!(
+                    "[campath] exported {} + {} to {}",
+                    xml_name,
+                    vdm_name,
+                    cwd.display()
+                ),
+                (a, b) => eprintln!("[campath] export failed: {a:?} {b:?}"),
+            }
+        }
+    }
+}
+
+/// Rebuild the compiled spline whenever keyframes/interp changed.
+fn campath_recompile(mut path: ResMut<Campath>) {
+    if !path.dirty {
+        return;
+    }
+    path.dirty = false;
+    let compiled = campath::CompiledCampath::compile(&path.keyframes, path.interp);
+    path.compiled = compiled;
+}
+
+/// When following, slave the camera to the path sampled at the current tick.
+fn campath_playback(
+    path: Res<Campath>,
+    pb: Res<Playback>,
+    mut cam_q: Query<(&mut Transform, &mut Projection, &mut FlyCam)>,
+) {
+    if !path.following {
+        return;
+    }
+    let Some(c) = &path.compiled else { return };
+    let Ok((mut tf, mut proj, mut cam)) = cam_q.get_single_mut() else {
+        return;
+    };
+    let (lo, hi) = c.tick_range();
+    let s = c.eval((pb.tick as f64).clamp(lo, hi));
+    let r = hammer_to_world_quat();
+    tf.translation = r * s.position;
+    tf.rotation = r * s.quaternion;
+    if let Projection::Perspective(p) = &mut *proj {
+        p.fov = s.fov.to_radians();
+    }
+    // Keep FlyCam angles in sync so releasing follow doesn't snap the view.
+    let (y, x, z) = tf.rotation.to_euler(EulerRot::YXZ);
+    cam.yaw = y;
+    cam.pitch = x;
+    cam.roll = z;
+}
+
+/// Draw the compiled path as a polyline plus a marker + forward ray at each keyframe.
+fn draw_campath(path: Res<Campath>, mut gizmos: Gizmos) {
+    let Some(c) = &path.compiled else { return };
+    let r = hammer_to_world_quat();
+    let (lo, hi) = c.tick_range();
+    let segments = 256usize;
+    let mut prev: Option<Vec3> = None;
+    for i in 0..=segments {
+        let t = lo + (hi - lo) * (i as f64 / segments as f64);
+        let p = r * c.eval(t).position;
+        if let Some(pp) = prev {
+            gizmos.line(pp, p, Color::srgb(1.0, 0.85, 0.2));
+        }
+        prev = Some(p);
+    }
+    for kf in &path.keyframes {
+        let p = r * Vec3::from_array(kf.position);
+        gizmos.sphere(p, Quat::IDENTITY, 8.0, Color::srgb(1.0, 0.4, 0.9));
+        let q = r * Quat::from_xyzw(kf.quaternion[0], kf.quaternion[1], kf.quaternion[2], kf.quaternion[3]);
+        let fwd = q * Vec3::new(0.0, 0.0, -1.0);
+        gizmos.line(p, p + fwd * 60.0, Color::srgb(0.3, 0.9, 1.0));
+    }
 }
 
 fn advance_playback(time: Res<Time>, mut pb: ResMut<Playback>, demo_res: Res<DemoRes>) {
@@ -637,8 +751,17 @@ fn fly_camera(
     mut windows: Query<&mut Window>,
     demo_res: Res<DemoRes>,
     pb: Res<Playback>,
+    path: Res<Campath>,
     mut q: Query<(&mut Transform, &mut FlyCam, &mut Projection)>,
 ) {
+    // While following the campath, the playback system owns the camera; free the
+    // cursor and bail so manual controls don't fight it.
+    if path.following {
+        let mut window = windows.single_mut();
+        window.cursor.grab_mode = CursorGrabMode::None;
+        window.cursor.visible = true;
+        return;
+    }
     let Ok((mut tf, mut cam, mut proj)) = q.get_single_mut() else {
         return;
     };
