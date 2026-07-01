@@ -3,7 +3,7 @@
 # native (Rust + bevy) campath tool — parse a demo, render map + players at a tick,
 # free-fly camera. Nothing here is meant to be production.
 [package]
-name = "previewer-native"
+name = "hlae-campath-previewer"
 version = "0.1.0"
 edition = "2021"
 
