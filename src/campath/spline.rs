@@ -316,10 +316,11 @@ fn rates(
     w[n - 1] = wf;
 }
 
-fn slew3_coeffs(dtheta: f64, e: V3, wi_seg: V3, wf_seg: V3) -> (V3, V3, V3) {
-    // Note: `dt` (segment duration) cancels out of the evaluated quaternion here
-    // because the reference multiplies a0/a1 by dt and slew3_quat re-divides by dt.
-    // We fold it out: pass dt=1 semantics (a0=wi_seg, a1=bvec-3*a2).
+fn slew3_coeffs(dtheta: f64, dt: f64, e: V3, wi_seg: V3, wf_seg: V3) -> (V3, V3, V3) {
+    // Mirrors HLAE's slew3_init exactly. The angular-rate coefficients a0/a1 must be
+    // scaled by the segment duration `dt` (they carry rad/sec and slew3_quat parameterizes
+    // by x = t/dt). Folding `dt` out was wrong for non-unit segment spacing: it
+    // under-weighted the rate terms, so the interior rotation swung less than HLAE's.
     let sa = dtheta.sin();
     let ca = dtheta.cos();
 
@@ -343,8 +344,8 @@ fn slew3_coeffs(dtheta: f64, e: V3, wi_seg: V3, wf_seg: V3) -> (V3, V3, V3) {
     let mut a2: V3 = [0.0; 3];
     for i in 0..3 {
         a2[i] = e[i] * dtheta;
-        a0[i] = wi_seg[i];
-        a1[i] = bvec[i] - 3.0 * a2[i];
+        a0[i] = wi_seg[i] * dt;
+        a1[i] = bvec[i] * dt - 3.0 * a2[i];
     }
     (a0, a1, a2)
 }
@@ -449,7 +450,8 @@ impl QSpline {
                 klo = k;
             }
         }
-        let (a0, a1, a2) = slew3_coeffs(self.dtheta[klo], self.e[klo], self.w[klo], self.w[klo + 1]);
+        let (a0, a1, a2) =
+            slew3_coeffs(self.dtheta[klo], self.h[klo], self.e[klo], self.w[klo], self.w[klo + 1]);
         slew3_quat(xi - self.x[klo], self.h[klo], &self.y[klo], a0, a1, a2)
     }
 }
