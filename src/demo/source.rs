@@ -14,6 +14,9 @@ use super::data::{Frame, PlayerSnap, ProjectileSnap};
 pub trait DemoSource: Send + Sync + 'static {
     /// Nearest frame at or before `tick`.
     fn frame_at(&self, tick: u32) -> Option<&Frame>;
+    /// First frame with a tick strictly greater than `tick`, for interpolating between
+    /// snapshots. Pairs with `frame_at`.
+    fn frame_after(&self, tick: u32) -> Option<&Frame>;
     fn max_tick(&self) -> u32;
     /// Seconds per tick (~0.015 for TF2).
     fn interval_per_tick(&self) -> f32;
@@ -45,6 +48,11 @@ impl DemoSource for DenseDemoSource {
             Err(0) => 0,
             Err(i) => i - 1,
         };
+        self.frames.get(idx)
+    }
+
+    fn frame_after(&self, tick: u32) -> Option<&Frame> {
+        let idx = self.frames.partition_point(|f| f.tick <= tick);
         self.frames.get(idx)
     }
 

@@ -11,11 +11,41 @@ use crate::app::AppSet;
 pub use load::load_demo_bytes;
 pub use source::{parse, ActiveDemo, DemoSource};
 
+/// How far `tick` sits between the `before` and `after` snapshots, in `[0, 1]`. Returns
+/// 0 when there's nothing to interpolate toward (no `after`, or same tick).
+pub(crate) fn interp_fraction(
+    tick: f32,
+    before: Option<&data::Frame>,
+    after: Option<&data::Frame>,
+) -> f32 {
+    match (before, after) {
+        (Some(b), Some(a)) if a.tick > b.tick => {
+            ((tick - b.tick as f32) / (a.tick - b.tick) as f32).clamp(0.0, 1.0)
+        }
+        _ => 0.0,
+    }
+}
+
+/// Shortest-arc interpolation between two angles in degrees.
+pub(crate) fn lerp_angle_deg(a: f32, b: f32, t: f32) -> f32 {
+    let mut d = (b - a) % 360.0;
+    if d > 180.0 {
+        d -= 360.0;
+    } else if d < -180.0 {
+        d += 360.0;
+    }
+    a + d * t
+}
+
 /// The playhead. `tick` is fractional so playback can accumulate sub-tick.
 #[derive(Resource)]
 pub(crate) struct Playback {
     pub(crate) tick: f32,
     pub(crate) playing: bool,
+    /// Playback rate multiplier. 1.0 = realtime, <1 slow-mo, >1 fast-forward.
+    pub(crate) speed: f32,
+    /// Lerp entity positions between snapshots so slow-mo doesn't step tick-by-tick.
+    pub(crate) interpolate: bool,
 }
 
 /// Demo path, only used to name exported campath files.
@@ -33,6 +63,8 @@ impl Plugin for DemoPlugin {
         app.insert_resource(Playback {
             tick: 1.0,
             playing: false,
+            speed: 1.0,
+            interpolate: true,
         })
         .add_event::<SeekTo>()
         .add_systems(Update, playback_input.in_set(AppSet::Input))
@@ -82,6 +114,6 @@ fn advance_playback(time: Res<Time>, mut pb: ResMut<Playback>, demo_res: Res<Act
         return;
     }
     let dt = time.delta_seconds();
-    let ticks = dt / demo_res.0.interval_per_tick().max(0.001);
-    pb.tick = (pb.tick + ticks).min(demo_res.0.max_tick() as f32);
+    let ticks = dt / demo_res.0.interval_per_tick().max(0.001) * pb.speed;
+    pb.tick = (pb.tick + ticks).clamp(1.0, demo_res.0.max_tick() as f32);
 }

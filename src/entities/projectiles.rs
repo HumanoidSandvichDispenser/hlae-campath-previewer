@@ -7,7 +7,7 @@ use bevy::prelude::*;
 
 use crate::app::AppSet;
 use crate::coords::{gltf_stand_up, hammer_to_world_quat};
-use crate::demo::{ActiveDemo, Playback};
+use crate::demo::{interp_fraction, lerp_angle_deg, ActiveDemo, Playback};
 use crate::map::WorldRoot;
 
 const PROJECTILE_POOL: usize = 64;
@@ -163,8 +163,13 @@ fn update_projectiles(
         &mut ProjectileModelState,
     )>,
 ) {
-    let frame = demo_res.0.frame_at(pb.tick as u32);
-    let projs = frame.map(|f| f.projectiles.as_slice()).unwrap_or(&[]);
+    let before = demo_res.0.frame_at(pb.tick as u32);
+    let after = pb
+        .interpolate
+        .then(|| demo_res.0.frame_after(pb.tick as u32))
+        .flatten();
+    let projs = before.map(|f| f.projectiles.as_slice()).unwrap_or(&[]);
+    let t = interp_fraction(pb.tick, before, after);
     // glTF-Y-up -> Hammer-Z-up, same correction the player models get.
     let stand_up = gltf_stand_up();
 
@@ -177,12 +182,23 @@ fn update_projectiles(
         let team_idx = if pr.team == 3 { 1 } else { 0 };
         let has_scene = assets.scene[ty][team_idx].is_some();
 
-        tf.translation = Vec3::from_array(pr.pos);
+        let mut pos = Vec3::from_array(pr.pos);
+        let mut rot = pr.rotation;
+        if t > 0.0 {
+            if let Some(np) = after.and_then(|a| a.projectiles.iter().find(|q| q.entity == pr.entity))
+            {
+                pos = pos.lerp(Vec3::from_array(np.pos), t);
+                for i in 0..3 {
+                    rot[i] = lerp_angle_deg(pr.rotation[i], np.rotation[i], t);
+                }
+            }
+        }
+        tf.translation = pos;
         tf.rotation = if assets.oriented[ty] {
             // Source angles -> Hammer-space forward (Z-up), then aim the model's
             // long axis (+Y) along it.
-            let pitch = pr.rotation[0].to_radians();
-            let yaw = pr.rotation[1].to_radians();
+            let pitch = rot[0].to_radians();
+            let yaw = rot[1].to_radians();
             let fwd = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), -pitch.sin());
             Quat::from_rotation_arc(Vec3::Y, fwd.normalize_or_zero())
         } else {

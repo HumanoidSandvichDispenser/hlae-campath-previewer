@@ -9,7 +9,7 @@ use bevy::prelude::*;
 
 use crate::app::AppSet;
 use crate::coords::{gltf_stand_up, hammer_to_world_quat};
-use crate::demo::{ActiveDemo, Playback};
+use crate::demo::{interp_fraction, lerp_angle_deg, ActiveDemo, Playback};
 use crate::map::WorldRoot;
 
 const PLAYER_POOL: usize = 32;
@@ -119,8 +119,13 @@ fn update_players(
         &mut ModelState,
     )>,
 ) {
-    let frame = demo_res.0.frame_at(pb.tick as u32);
-    let players = frame.map(|f| f.players.as_slice()).unwrap_or(&[]);
+    let before = demo_res.0.frame_at(pb.tick as u32);
+    let after = pb
+        .interpolate
+        .then(|| demo_res.0.frame_after(pb.tick as u32))
+        .flatten();
+    let players = before.map(|f| f.players.as_slice()).unwrap_or(&[]);
+    let t = interp_fraction(pb.tick, before, after);
     // glTF-Y-up -> our Hammer-Z-up player space (stand the model upright).
     let stand_up = gltf_stand_up();
 
@@ -132,8 +137,16 @@ fn update_players(
 
         // Children of the rotated root, so keep positions in raw Hammer coords; yaw is
         // about Hammer up (Z). Model origin is at the feet.
-        tf.translation = Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
-        tf.rotation = Quat::from_rotation_z(p.yaw.to_radians() + yaw_off.0);
+        let mut pos = Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
+        let mut yaw = p.yaw;
+        if t > 0.0 {
+            if let Some(np) = after.and_then(|a| a.players.iter().find(|q| q.entity == p.entity)) {
+                pos = pos.lerp(Vec3::new(np.pos[0], np.pos[1], np.pos[2]), t);
+                yaw = lerp_angle_deg(p.yaw, np.yaw, t);
+            }
+        }
+        tf.translation = pos;
+        tf.rotation = Quat::from_rotation_z(yaw.to_radians() + yaw_off.0);
 
         let key = (p.class, p.team);
         if ms.key != Some(key) {

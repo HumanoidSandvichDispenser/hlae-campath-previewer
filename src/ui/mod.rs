@@ -108,6 +108,25 @@ fn timeline_bar(
                     }
                     ui.monospace(format!("/ {}", max as u32));
                 });
+
+                ui.horizontal(|ui| {
+                    ui.label("speed");
+                    for preset in [0.25, 0.5, 1.0, 2.0, 4.0] {
+                        let on = (pb.speed - preset).abs() < 1e-3;
+                        if ui.selectable_label(on, format!("{preset}x")).clicked() {
+                            pb.speed = preset;
+                        }
+                    }
+                    ui.add(
+                        egui::DragValue::new(&mut pb.speed)
+                            .speed(0.01)
+                            .range(0.05..=16.0)
+                            .suffix("x"),
+                    );
+                    ui.separator();
+                    ui.checkbox(&mut pb.interpolate, "smooth")
+                        .on_hover_text("Interpolate positions between ticks");
+                });
             });
         });
 }
