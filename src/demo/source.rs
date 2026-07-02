@@ -36,6 +36,14 @@ pub struct DenseDemoSource {
     frames: Vec<Frame>,
     interval_per_tick: f32,
     max_tick: u32,
+    map: String,
+}
+
+impl DenseDemoSource {
+    /// Map name from the demo header, e.g. `ultiduo_swine_b06`. Empty if the header had none.
+    pub fn map_name(&self) -> &str {
+        &self.map
+    }
 }
 
 impl DemoSource for DenseDemoSource {
@@ -89,8 +97,9 @@ impl DemoSource for DenseDemoSource {
 /// (entities are delta-compressed), so: one sequential pass, snapshot every tick.
 pub fn parse(bytes: &[u8]) -> anyhow::Result<DenseDemoSource> {
     let demo = Demo::new(bytes);
-    let (_header, mut ticker) =
+    let (header, mut ticker) =
         DemoParser::new_with_analyser(demo.get_stream(), GameStateAnalyser::default()).ticker()?;
+    let map = header.map.clone();
 
     let mut frames: Vec<Frame> = Vec::new();
     let mut interval_per_tick = 0.0_f32;
@@ -169,5 +178,6 @@ pub fn parse(bytes: &[u8]) -> anyhow::Result<DenseDemoSource> {
         frames,
         interval_per_tick,
         max_tick,
+        map,
     })
 }
