@@ -29,9 +29,24 @@ pub struct PlayerSnap {
     pub death_age: u32,
 }
 
+/// A projectile's transform at one tick. Positions are raw Hammer units (Z-up).
+#[derive(Clone, Copy, Debug)]
+pub struct ProjectileSnap {
+    pub entity: u32,
+    pub pos: [f32; 3],
+    /// Source euler angles in degrees: [pitch, yaw, roll].
+    pub rotation: [f32; 3],
+    pub team: u8, // 2 = red, 3 = blue
+    /// ProjectileType as u8: 0 rocket, 1 healing arrow, 2 sticky, 3 pipe, 4 flare,
+    /// 5 loose cannon, 7 unknown.
+    pub ty: u8,
+    pub critical: bool,
+}
+
 pub struct Frame {
     pub tick: u32,
     pub players: Vec<PlayerSnap>,
+    pub projectiles: Vec<ProjectileSnap>,
 }
 
 pub struct DemoData {
@@ -103,7 +118,23 @@ pub fn parse(bytes: &[u8]) -> anyhow::Result<DemoData> {
                     }
                 })
                 .collect();
-            frames.push(Frame { tick, players });
+            let projectiles = state
+                .projectiles
+                .iter()
+                .map(|(_, pr)| ProjectileSnap {
+                    entity: u32::from(pr.id),
+                    pos: [pr.position.x, pr.position.y, pr.position.z],
+                    rotation: [pr.rotation.x, pr.rotation.y, pr.rotation.z],
+                    team: pr.team as u8,
+                    ty: pr.ty as u8,
+                    critical: pr.critical,
+                })
+                .collect();
+            frames.push(Frame {
+                tick,
+                players,
+                projectiles,
+            });
             last_tick = tick;
         }
 

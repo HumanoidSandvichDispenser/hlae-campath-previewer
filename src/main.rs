@@ -7,7 +7,7 @@
 //!
 //! Controls: RMB hold = mouselook · WASD/RF fly · Space = play/pause · ←/→ seek 50 ·
 //!           ,/. step 1 tick · +/- fly speed · B = toggle AABBs · Esc = quit
-//! Campath:  K = add keyframe here · L = delete last · P = follow path · F5 = export
+//! Campath:  V = add keyframe here · L = delete last · P = follow path · F5 = export
 
 mod campath;
 mod demo;
@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
+use bevy::render::camera::Viewport;
 use bevy::window::CursorGrabMode;
 
 // ── Coordinate calibration (tune on artix by eye) ───────────────────────────────
@@ -31,6 +32,9 @@ fn world_root_transform() -> Transform {
 }
 
 const PLAYER_POOL: usize = 32;
+const PROJECTILE_POOL: usize = 64;
+/// How many ticks of history to draw behind each live projectile as a trail.
+const TRAIL_TICKS: u32 = 40;
 const FLY_SPEED: f32 = 900.0;
 const MOUSE_SENS: f32 = 0.0015;
 
@@ -90,6 +94,45 @@ struct ModelState {
     blend: bool,
 }
 
+/// A slot in the projectile render pool.
+#[derive(Component)]
+struct ProjectileSlot(usize);
+
+/// Preloaded render assets per projectile type (indexed by ProjectileType u8).
+/// Rocket/pipe/sticky have real GLB scenes (from dribble.tf); every other type
+/// falls back to a primitive mesh. team_idx: 0 = red, 1 = blue.
+#[derive(Resource)]
+struct ProjectileAssets {
+    /// Primitive fallback mesh per type.
+    mesh: Vec<Handle<Mesh>>,
+    /// Primitive fallback material per type, per team.
+    mat: Vec<[Handle<StandardMaterial>; 2]>,
+    /// Real GLB scene per type, per team. `None` = no model, use the primitive.
+    scene: Vec<[Option<Handle<Scene>>; 2]>,
+    /// Whether this type is elongated (rocket/arrow) and should aim along travel.
+    oriented: Vec<bool>,
+}
+
+/// Which representation a projectile slot currently shows, so we only respawn the
+/// child on a type/team change. `(ty, team, is_scene)`.
+#[derive(Component, Default)]
+struct ProjectileModelState {
+    key: Option<(u8, u8, bool)>,
+    child: Option<Entity>,
+}
+
+fn projectile_type_name(ty: u8) -> &'static str {
+    match ty {
+        0 => "rocket",
+        1 => "healing arrow",
+        2 => "sticky",
+        3 => "pipe",
+        4 => "flare",
+        5 => "loose cannon",
+        _ => "unknown",
+    }
+}
+
 fn class_name(class: u8) -> Option<&'static str> {
     Some(match class {
         1 => "scout",
@@ -128,7 +171,7 @@ struct FlyCam {
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let demo_path = args.next().unwrap_or_else(|| "assets/demo.dem".into());
-    let map_asset = args.next().unwrap_or_else(|| "map.glb".into());
+    let map_asset = args.next().unwrap_or_else(|| "map_snakewater.glb".into());
 
     eprintln!("[spike] parsing {demo_path} ...");
     let bytes = std::fs::read(&demo_path)?;
@@ -171,15 +214,19 @@ fn main() -> anyhow::Result<()> {
                 input_controls,
                 advance_playback,
                 update_players,
+                update_projectiles,
+                draw_projectile_trails,
                 draw_player_aabb,
                 campath_input,
                 campath_recompile,
                 campath_playback,
                 draw_campath,
+                enforce_16_9_viewport,
                 clone_player_materials,
                 fade_dead_players,
                 fly_camera,
                 report_fps,
+                report_memory,
             )
                 .chain(),
         )
@@ -196,6 +243,8 @@ fn setup(
     asset_server: Res<AssetServer>,
     map_path: Res<MapAssetPath>,
     demo_res: Res<DemoRes>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let map_scene: Handle<Scene> = asset_server.load(format!("{}#Scene0", map_path.0));
 
@@ -211,11 +260,76 @@ fn setup(
     commands.insert_resource(PlayerModels(models));
     commands.insert_resource(PlayerYaw(FRAC_PI_2)); // +90°: corrects observed rightward facing
 
+    // Projectile meshes/materials, keyed by ProjectileType u8 (0..=7). No dedicated GLBs
+    // exist, so build primitive shapes: capsules for rockets/arrows (oriented to travel),
+    // spheres for the various grenades/flares.
+    let mut proj_mesh = Vec::with_capacity(8);
+    let mut proj_oriented = Vec::with_capacity(8);
+    for ty in 0..8u8 {
+        let (mesh, oriented): (Mesh, bool) = match ty {
+            0 => (Capsule3d::new(3.0, 14.0).into(), true),  // rocket
+            1 => (Capsule3d::new(1.5, 30.0).into(), true),  // healing arrow
+            2 => (Sphere::new(5.0).into(), false),          // sticky
+            3 => (Sphere::new(5.0).into(), false),          // pipe
+            4 => (Sphere::new(3.5).into(), false),          // flare
+            5 => (Sphere::new(6.0).into(), false),          // loose cannon
+            _ => (Sphere::new(4.0).into(), false),          // unknown
+        };
+        proj_mesh.push(meshes.add(mesh));
+        proj_oriented.push(oriented);
+    }
+    // Per-team materials. Flares glow orange regardless of team.
+    let mut proj_mat: Vec<[Handle<StandardMaterial>; 2]> = Vec::with_capacity(8);
+    for ty in 0..8u8 {
+        let mut make = |base: Color, emissive: LinearRgba| {
+            materials.add(StandardMaterial {
+                base_color: base,
+                emissive,
+                perceptual_roughness: 0.6,
+                ..default()
+            })
+        };
+        let pair = if ty == 4 {
+            let flare = LinearRgba::new(3.0, 1.2, 0.1, 1.0);
+            [
+                make(Color::srgb(1.0, 0.6, 0.1), flare),
+                make(Color::srgb(1.0, 0.6, 0.1), flare),
+            ]
+        } else {
+            [
+                make(Color::srgb(1.0, 0.25, 0.2), LinearRgba::new(0.3, 0.05, 0.04, 1.0)),
+                make(Color::srgb(0.3, 0.5, 1.0), LinearRgba::new(0.04, 0.08, 0.3, 1.0)),
+            ]
+        };
+        proj_mat.push(pair);
+    }
+    // Real GLB models for rocket/pipe/sticky (dribble.tf assets); others stay primitive.
+    // Rocket is team-neutral (one shared model used for both).
+    let mut proj_scene: Vec<[Option<Handle<Scene>>; 2]> = vec![[None, None]; 8];
+    let load_scene = |s: &AssetServer, p: &str| -> Handle<Scene> { s.load(format!("{p}#Scene0")) };
+    let rocket = load_scene(&asset_server, "projectiles/rocket_shared.glb");
+    proj_scene[0] = [Some(rocket.clone()), Some(rocket)]; // rocket
+    proj_scene[2] = [
+        Some(load_scene(&asset_server, "projectiles/stickybomb_red.glb")),
+        Some(load_scene(&asset_server, "projectiles/stickybomb_blue.glb")),
+    ]; // sticky
+    proj_scene[3] = [
+        Some(load_scene(&asset_server, "projectiles/pipebomb_red.glb")),
+        Some(load_scene(&asset_server, "projectiles/pipebomb_blue.glb")),
+    ]; // pipe
+
+    commands.insert_resource(ProjectileAssets {
+        mesh: proj_mesh,
+        mat: proj_mat,
+        scene: proj_scene,
+        oriented: proj_oriented,
+    });
+
     // Everything that lives in Hammer coords goes under this rotated root.
     let root = commands.spawn((SpatialBundle::from_transform(world_root_transform()),)).id();
 
-    // Calibrated on artix: +90° about X cancels the world root's -90° for the map
-    // (the map GLB is already Y-up; only the players needed the Hammer->Y-up rotation).
+    // The map GLB is exported Y-up, so it needs +90° about X to cancel the world root's
+    // -90° (players live in raw Hammer coords and want the root rotation as-is).
     let map_rot = Quat::from_rotation_x(FRAC_PI_2);
 
     commands.entity(root).with_children(|parent| {
@@ -238,6 +352,18 @@ fn setup(
                 },
                 PlayerSlot(i),
                 ModelState::default(),
+            ));
+        }
+        // Projectile render pool: hidden spatial nodes; each gets a mesh/scene child
+        // assigned per tick (mirrors the player rig pattern).
+        for i in 0..PROJECTILE_POOL {
+            parent.spawn((
+                SpatialBundle {
+                    visibility: Visibility::Hidden,
+                    ..default()
+                },
+                ProjectileSlot(i),
+                ProjectileModelState::default(),
             ));
         }
     });
@@ -328,6 +454,50 @@ fn report_fps(
     eprintln!("[spike] {:.1} fps  tick {}", fps, pb.tick as u32);
 }
 
+/// F6: dump a breakdown of decoded asset bytes held in CPU RAM, to see where process
+/// memory is going. Textures (Image.data) and mesh vertex/index buffers keep a MAIN_WORLD
+/// copy in addition to the GPU upload unless stripped, and are usually the largest chunk.
+fn report_memory(
+    keys: Res<ButtonInput<KeyCode>>,
+    images: Res<Assets<Image>>,
+    meshes: Res<Assets<Mesh>>,
+    demo_res: Res<DemoRes>,
+) {
+    if !keys.just_pressed(KeyCode::F6) {
+        return;
+    }
+    let img_bytes: usize = images.iter().map(|(_, i)| i.data.len()).sum();
+    let mesh_bytes: usize = meshes
+        .iter()
+        .map(|(_, m)| {
+            let v: usize = m
+                .attributes()
+                .map(|(_, a)| a.get_bytes().len())
+                .sum();
+            let i = m.indices().map(|i| i.len() * 4).unwrap_or(0);
+            v + i
+        })
+        .sum();
+    let demo_bytes: usize = demo_res
+        .0
+        .frames
+        .iter()
+        .map(|f| {
+            f.players.len() * std::mem::size_of::<demo::PlayerSnap>()
+                + f.projectiles.len() * std::mem::size_of::<demo::ProjectileSnap>()
+        })
+        .sum();
+    let mb = |b: usize| b as f64 / 1_048_576.0;
+    eprintln!(
+        "[mem] images: {} assets, {:.1} MB (CPU copy) · meshes: {} assets, {:.1} MB · demo cache: {:.1} MB",
+        images.len(),
+        mb(img_bytes),
+        meshes.len(),
+        mb(mesh_bytes),
+        mb(demo_bytes),
+    );
+}
+
 // Rotations between Source/Hammer Z-up (where campath data lives, matching the web
 // app + HLAE) and bevy's Y-up world. The camera lives directly in bevy world, so we
 // convert its pose at capture (world->hammer) and at playback (hammer->world).
@@ -343,7 +513,7 @@ fn hammer_to_world(p: [f32; 3]) -> Vec3 {
     hammer_to_world_quat() * Vec3::new(p[0], p[1], p[2])
 }
 
-/// K add keyframe · L delete highest-tick · P follow · F5 export XML+VDM.
+/// V add keyframe · L delete highest-tick · P follow · F5 export XML+VDM.
 fn campath_input(
     keys: Res<ButtonInput<KeyCode>>,
     pb: Res<Playback>,
@@ -352,7 +522,7 @@ fn campath_input(
     mut path: ResMut<Campath>,
     cam_q: Query<(&Transform, &Projection), With<FlyCam>>,
 ) {
-    if keys.just_pressed(KeyCode::KeyK) {
+    if keys.just_pressed(KeyCode::KeyV) {
         if let Ok((tf, proj)) = cam_q.get_single() {
             let tick = pb.tick.round() as u32;
             let inv = world_to_hammer_quat();
@@ -491,11 +661,67 @@ fn draw_campath(path: Res<Campath>, mut gizmos: Gizmos) {
     }
     for kf in &path.keyframes {
         let p = r * Vec3::from_array(kf.position);
-        gizmos.sphere(p, Quat::IDENTITY, 8.0, Color::srgb(1.0, 0.4, 0.9));
         let q = r * Quat::from_xyzw(kf.quaternion[0], kf.quaternion[1], kf.quaternion[2], kf.quaternion[3]);
-        let fwd = q * Vec3::new(0.0, 0.0, -1.0);
-        gizmos.line(p, p + fwd * 60.0, Color::srgb(0.3, 0.9, 1.0));
+        draw_frustum(&mut gizmos, p, q, Color::srgb(1.0, 0.4, 0.9));
     }
+}
+
+/// Draw a camera frustum: apex at `p`, opening along the camera's forward (-Z) axis,
+/// oriented by `q`. Four edges run from the apex to a far rectangle, which is outlined.
+fn draw_frustum(gizmos: &mut Gizmos, p: Vec3, q: Quat, color: Color) {
+    const DEPTH: f32 = 60.0; // distance to the far plane, world units
+    const HALF_W: f32 = 26.0; // half width of the far plane (~47deg horizontal FOV)
+    const HALF_H: f32 = 16.0; // half height of the far plane
+
+    let fwd = q * Vec3::new(0.0, 0.0, -1.0);
+    let up = q * Vec3::Y;
+    let right = q * Vec3::X;
+    let center = p + fwd * DEPTH;
+
+    // Far-plane corners, CCW: top-left, top-right, bottom-right, bottom-left.
+    let corners = [
+        center - right * HALF_W + up * HALF_H,
+        center + right * HALF_W + up * HALF_H,
+        center + right * HALF_W - up * HALF_H,
+        center - right * HALF_W - up * HALF_H,
+    ];
+
+    for c in corners {
+        gizmos.line(p, c, color); // apex edge
+    }
+    for i in 0..4 {
+        gizmos.line(corners[i], corners[(i + 1) % 4], color); // far-plane outline
+    }
+    // Up indicator: a small marker at the top edge so orientation reads at a glance.
+    let top_mid = (corners[0] + corners[1]) * 0.5;
+    gizmos.line(top_mid, top_mid + up * HALF_H * 0.5, Color::srgb(0.3, 0.9, 1.0));
+}
+
+/// Keep the camera viewport at the largest 16:9 rect that fits the window,
+/// centered with letterbox/pillarbox bars filled by the clear color.
+fn enforce_16_9_viewport(
+    windows: Query<&Window>,
+    mut cam_q: Query<&mut Camera, With<FlyCam>>,
+) {
+    let Ok(window) = windows.get_single() else { return };
+    let Ok(mut camera) = cam_q.get_single_mut() else { return };
+    let w = window.physical_width();
+    let h = window.physical_height();
+    if w == 0 || h == 0 {
+        return;
+    }
+    let (vw, vh) = if w * 9 > h * 16 {
+        (h * 16 / 9, h) // wider than 16:9 → pillarbox
+    } else {
+        (w, w * 9 / 16) // taller than 16:9 → letterbox
+    };
+    let x = (w - vw) / 2;
+    let y = (h - vh) / 2;
+    camera.viewport = Some(Viewport {
+        physical_position: UVec2::new(x, y),
+        physical_size: UVec2::new(vw, vh),
+        ..default()
+    });
 }
 
 fn advance_playback(time: Res<Time>, mut pb: ResMut<Playback>, demo_res: Res<DemoRes>) {
@@ -566,6 +792,119 @@ fn update_players(
         } else {
             Visibility::Hidden
         };
+    }
+}
+
+/// Place the projectile pool at the current tick: assign each active projectile a pool
+/// slot, swap in the mesh/material for its type, orient elongated types along travel,
+/// and hide the unused slots. Children of the world root, so positions stay Hammer-space.
+fn update_projectiles(
+    mut commands: Commands,
+    pb: Res<Playback>,
+    demo_res: Res<DemoRes>,
+    assets: Res<ProjectileAssets>,
+    mut q: Query<(
+        Entity,
+        &ProjectileSlot,
+        &mut Transform,
+        &mut Visibility,
+        &mut ProjectileModelState,
+    )>,
+) {
+    let frame = demo_res.0.frame_at(pb.tick as u32);
+    let projs = frame.map(|f| f.projectiles.as_slice()).unwrap_or(&[]);
+    // glTF-Y-up -> Hammer-Z-up, same correction the player models get.
+    let stand_up = Quat::from_rotation_x(FRAC_PI_2);
+
+    for (slot_ent, slot, mut tf, mut vis, mut ms) in &mut q {
+        let Some(pr) = projs.get(slot.0) else {
+            *vis = Visibility::Hidden;
+            continue;
+        };
+        let ty = pr.ty.min(7) as usize;
+        let team_idx = if pr.team == 3 { 1 } else { 0 };
+        let has_scene = assets.scene[ty][team_idx].is_some();
+
+        tf.translation = Vec3::from_array(pr.pos);
+        tf.rotation = if assets.oriented[ty] {
+            // Source angles -> Hammer-space forward (Z-up), then aim the model's
+            // long axis (+Y) along it.
+            let pitch = pr.rotation[0].to_radians();
+            let yaw = pr.rotation[1].to_radians();
+            let fwd = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), -pitch.sin());
+            Quat::from_rotation_arc(Vec3::Y, fwd.normalize_or_zero())
+        } else {
+            Quat::IDENTITY
+        };
+
+        // Respawn the child only when the representation changes.
+        let key = (pr.ty, pr.team, has_scene);
+        if ms.key != Some(key) {
+            if let Some(child) = ms.child.take() {
+                commands.entity(child).despawn_recursive();
+            }
+            let child = if let Some(scene) = assets.scene[ty][team_idx].clone() {
+                commands
+                    .spawn(SceneBundle {
+                        scene,
+                        transform: Transform::from_rotation(stand_up),
+                        ..default()
+                    })
+                    .id()
+            } else {
+                commands
+                    .spawn(PbrBundle {
+                        mesh: assets.mesh[ty].clone(),
+                        material: assets.mat[ty][team_idx].clone(),
+                        ..default()
+                    })
+                    .id()
+            };
+            commands.entity(slot_ent).add_child(child);
+            ms.child = Some(child);
+            ms.key = Some(key);
+        }
+
+        *vis = Visibility::Visible;
+    }
+}
+
+/// Draw a fading polyline behind each live projectile by gathering its recent positions
+/// from the demo's per-tick cache (seek-stable — reconstructed, not accumulated).
+fn draw_projectile_trails(pb: Res<Playback>, demo_res: Res<DemoRes>, mut gizmos: Gizmos) {
+    let cur = pb.tick as u32;
+    let lo = cur.saturating_sub(TRAIL_TICKS);
+    // Same rotation the world root applies to Hammer-space children.
+    let root_rot = Quat::from_rotation_x(-FRAC_PI_2);
+
+    // entity -> ordered (tick, world_pos, team) samples across the trail window.
+    let mut trails: HashMap<u32, Vec<(u32, Vec3, u8)>> = HashMap::new();
+    for f in &demo_res.0.frames {
+        if f.tick < lo || f.tick > cur {
+            continue;
+        }
+        for pr in &f.projectiles {
+            trails
+                .entry(pr.entity)
+                .or_default()
+                .push((f.tick, root_rot * Vec3::from_array(pr.pos), pr.team));
+        }
+    }
+
+    for samples in trails.values() {
+        for pair in samples.windows(2) {
+            let (_, a, team) = pair[0];
+            let (bt, b, _) = pair[1];
+            // Fade older segments toward transparent.
+            let age = cur.saturating_sub(bt) as f32 / TRAIL_TICKS as f32;
+            let alpha = (1.0 - age).clamp(0.05, 1.0);
+            let base = if team == 2 {
+                Color::srgba(1.0, 0.4, 0.3, alpha)
+            } else {
+                Color::srgba(0.4, 0.6, 1.0, alpha)
+            };
+            gizmos.line(a, b, base);
+        }
     }
 }
 

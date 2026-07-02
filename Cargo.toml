@@ -30,6 +30,7 @@ features = [
   "bevy_gizmos",
   "bevy_render",
   "png",
+  "jpeg",
   "ktx2",
   "zstd",
   "tonemapping_luts",
