@@ -107,6 +107,7 @@ fn update_players(
     demo_res: Res<ActiveDemo>,
     models: Res<PlayerModels>,
     yaw_off: Res<PlayerYaw>,
+    opts: Res<crate::ui::ViewOptions>,
     mut q: Query<(
         Entity,
         &PlayerSlot,
@@ -115,13 +116,14 @@ fn update_players(
         &mut ModelState,
     )>,
 ) {
-    let before = demo_res.0.frame_at(pb.tick as u32);
+    let stick = crate::demo::delayed_tick(pb.tick, opts.player_delay_ms, demo_res.0.interval_per_tick());
+    let before = demo_res.0.frame_at(stick as u32);
     let after = pb
         .interpolate
-        .then(|| demo_res.0.frame_after(pb.tick as u32))
+        .then(|| demo_res.0.frame_after(stick as u32))
         .flatten();
     let players = before.map(|f| f.players.as_slice()).unwrap_or(&[]);
-    let t = interp_fraction(pb.tick, before, after);
+    let t = interp_fraction(stick, before, after);
     // glTF-Y-up -> our Hammer-Z-up player space (stand the model upright).
     let stand_up = gltf_stand_up();
 

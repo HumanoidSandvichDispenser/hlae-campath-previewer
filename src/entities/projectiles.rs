@@ -155,6 +155,7 @@ fn update_projectiles(
     pb: Res<Playback>,
     demo_res: Res<ActiveDemo>,
     assets: Res<ProjectileAssets>,
+    opts: Res<crate::ui::ViewOptions>,
     mut q: Query<(
         Entity,
         &ProjectileSlot,
@@ -163,13 +164,14 @@ fn update_projectiles(
         &mut ProjectileModelState,
     )>,
 ) {
-    let before = demo_res.0.frame_at(pb.tick as u32);
+    let stick = crate::demo::delayed_tick(pb.tick, opts.player_delay_ms, demo_res.0.interval_per_tick());
+    let before = demo_res.0.frame_at(stick as u32);
     let after = pb
         .interpolate
-        .then(|| demo_res.0.frame_after(pb.tick as u32))
+        .then(|| demo_res.0.frame_after(stick as u32))
         .flatten();
     let projs = before.map(|f| f.projectiles.as_slice()).unwrap_or(&[]);
-    let t = interp_fraction(pb.tick, before, after);
+    let t = interp_fraction(stick, before, after);
     // glTF-Y-up -> Hammer-Z-up, same correction the player models get.
     let stand_up = gltf_stand_up();
 

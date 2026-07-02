@@ -26,6 +26,15 @@ pub(crate) fn interp_fraction(
     }
 }
 
+/// The playhead tick to sample entities at, pushed `delay_ms` behind `tick` to emulate
+/// TF2's entity-interpolation lag. `interval_s` is the demo's seconds-per-tick. Clamped
+/// to the first tick so early frames don't underflow. The camera never uses this.
+pub(crate) fn delayed_tick(tick: f32, delay_ms: f32, interval_s: f32) -> f32 {
+    let per_tick_ms = interval_s * 1000.0;
+    let dt = if per_tick_ms > 0.0 { delay_ms / per_tick_ms } else { 0.0 };
+    (tick - dt).max(1.0)
+}
+
 /// Shortest-arc interpolation between two angles in degrees.
 pub(crate) fn lerp_angle_deg(a: f32, b: f32, t: f32) -> f32 {
     let mut d = (b - a) % 360.0;

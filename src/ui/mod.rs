@@ -83,6 +83,11 @@ pub(crate) struct ViewOptions {
     /// Preview letterbox to a narrower ratio (2.39 etc.), or `None` for the full 16:9.
     /// Preview only: it does not change FOV or the exported campath.
     pub(crate) aspect: Option<f32>,
+    /// Emulate TF2's entity-interpolation lag: sample players/projectiles this many
+    /// milliseconds *behind* the playhead so the preview matches what the in-game render
+    /// shows. The camera is unaffected. ~15 ms (≈1 tick) matches `cl_interp 0` +
+    /// `cl_interp_ratio 1`; the default 0.1 s TF2 lerp is ~100 ms. 0 = true tick position.
+    pub(crate) player_delay_ms: f32,
 }
 
 impl Default for ViewOptions {
@@ -95,6 +100,7 @@ impl Default for ViewOptions {
             spiral_rot: 0,
             spiral_grid: false,
             aspect: None,
+            player_delay_ms: 15.0,
         }
     }
 }
@@ -510,6 +516,7 @@ fn options_panel(
     keys: Res<ButtonInput<KeyCode>>,
     mut ui_state: ResMut<UiState>,
     mut opts: ResMut<ViewOptions>,
+    demo_res: Res<ActiveDemo>,
 ) {
     if keys.just_pressed(KeyCode::F3) {
         ui_state.show_options = !ui_state.show_options;
@@ -554,6 +561,24 @@ fn options_panel(
                 ui.selectable_value(&mut opts.aspect, Some(1.85), "1.85");
                 ui.selectable_value(&mut opts.aspect, Some(2.0), "2.00");
                 ui.selectable_value(&mut opts.aspect, Some(2.39), "2.39");
+            });
+
+            ui.separator();
+            let per_tick_ms = demo_res.0.interval_per_tick() * 1000.0;
+            let ticks = if per_tick_ms > 0.0 { opts.player_delay_ms / per_tick_ms } else { 0.0 };
+            ui.label("Player interp delay")
+                .on_hover_text(
+                    "Sample players/projectiles this far behind the playhead to match TF2's \
+                     entity-interpolation lag in the final render. Camera is unaffected. \
+                     15 ms (~1 tick) = cl_interp 0 + cl_interp_ratio 1; 100 ms = default lerp.",
+                );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Slider::new(&mut opts.player_delay_ms, 0.0..=120.0)
+                        .suffix(" ms")
+                        .fixed_decimals(0),
+                );
+                ui.label(format!("({ticks:.1} tick)"));
             });
         });
 }
@@ -714,7 +739,9 @@ fn player_name_overlay(
     if !opts.show_names {
         return;
     }
-    let Some(frame) = demo_res.0.frame_at(pb.tick as u32) else {
+    // Match the player models' interpolation-delayed sampling so tags track heads.
+    let stick = crate::demo::delayed_tick(pb.tick, opts.player_delay_ms, demo_res.0.interval_per_tick());
+    let Some(frame) = demo_res.0.frame_at(stick as u32) else {
         return;
     };
     let Ok((camera, cam_tf)) = cam_q.get_single() else {
