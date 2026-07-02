@@ -123,16 +123,29 @@ impl Campath {
     }
 }
 
-/// Camera pose in Source Z-up: position, quaternion [x,y,z,w], vertical fov in degrees.
-/// This is what a keyframe stores.
+/// HLAE/Source store a *horizontal* fov referenced to 4:3; Bevy's `PerspectiveProjection`
+/// wants a *vertical* fov. Convert with the 4:3 reference (radians in/out). Once Bevy
+/// renders the resulting vertical fov into our enforced 16:9 viewport it widens horizontally
+/// the same way Source's Hor+ scaling does, so the preview framing matches the game render.
+pub(crate) fn hfov43_to_vfov(hfov: f32) -> f32 {
+    2.0 * ((hfov * 0.5).tan() * 3.0 / 4.0).atan()
+}
+/// Inverse of [`hfov43_to_vfov`]: Bevy vertical fov -> HLAE/Source horizontal-at-4:3 fov.
+pub(crate) fn vfov_to_hfov43(vfov: f32) -> f32 {
+    2.0 * ((vfov * 0.5).tan() * 4.0 / 3.0).atan()
+}
+
+/// Camera pose in Source Z-up: position, quaternion [x,y,z,w], and fov in degrees stored the
+/// HLAE way (horizontal, referenced to 4:3). This is what a keyframe stores.
 pub(crate) fn capture_pose(tf: &Transform, proj: &Projection) -> ([f32; 3], [f32; 4], f32) {
     let inv = world_to_hammer_quat();
     let pos = inv * tf.translation;
     let q = inv * tf.rotation;
-    let fov = match proj {
-        Projection::Perspective(p) => p.fov.to_degrees(),
-        _ => DEFAULT_FOV.to_degrees(),
+    let vfov = match proj {
+        Projection::Perspective(p) => p.fov,
+        _ => DEFAULT_FOV,
     };
+    let fov = vfov_to_hfov43(vfov).to_degrees();
     ([pos.x, pos.y, pos.z], [q.x, q.y, q.z, q.w], fov)
 }
 
@@ -278,7 +291,8 @@ pub(crate) fn campath_playback(
     tf.translation = r * s.position;
     tf.rotation = r * s.quaternion;
     if let Projection::Perspective(p) = &mut *proj {
-        p.fov = s.fov.to_radians();
+        // Stored fov is HLAE horizontal-at-4:3; Bevy wants vertical.
+        p.fov = hfov43_to_vfov(s.fov.to_radians());
     }
     // Keep FlyCam angles in sync so releasing follow doesn't snap the view.
     let (y, x, z) = tf.rotation.to_euler(EulerRot::YXZ);
@@ -340,4 +354,25 @@ fn draw_frustum(gizmos: &mut Gizmos, p: Vec3, q: Quat, color: Color) {
     // Up indicator: a small marker at the top edge so orientation reads at a glance.
     let top_mid = (corners[0] + corners[1]) * 0.5;
     gizmos.line(top_mid, top_mid + up * HALF_H * 0.5, Color::srgb(0.3, 0.9, 1.0));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hfov43_to_vfov, vfov_to_hfov43};
+
+    #[test]
+    fn hfov43_to_vfov_known_value() {
+        // Source default fov 90 (horizontal @ 4:3) -> ~73.74 deg vertical.
+        let v = hfov43_to_vfov(90.0_f32.to_radians()).to_degrees();
+        assert!((v - 73.7398).abs() < 1e-3, "got {v}");
+    }
+
+    #[test]
+    fn fov_conversion_round_trips() {
+        for hfov_deg in [38.0_f32, 56.0, 76.0, 90.0, 120.0] {
+            let h = hfov_deg.to_radians();
+            let back = vfov_to_hfov43(hfov43_to_vfov(h)).to_degrees();
+            assert!((back - hfov_deg).abs() < 1e-4, "hfov {hfov_deg} -> {back}");
+        }
+    }
 }
