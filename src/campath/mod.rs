@@ -228,7 +228,10 @@ pub(crate) fn campath_playback(
 }
 
 /// Polyline along the compiled path plus a frustum at each keyframe.
-fn draw_campath(path: Res<Campath>, mut gizmos: Gizmos) {
+fn draw_campath(path: Res<Campath>, opts: Res<crate::ui::ViewOptions>, mut gizmos: Gizmos) {
+    if !opts.show_campath {
+        return;
+    }
     let Some(c) = &path.compiled else { return };
     let r = hammer_to_world_quat();
     let (lo, hi) = c.tick_range();

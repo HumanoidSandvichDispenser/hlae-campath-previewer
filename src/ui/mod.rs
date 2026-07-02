@@ -17,18 +17,75 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(EguiPlugin)
             .init_resource::<UiState>()
-            .add_systems(Update, (timeline_bar, campath_panel).in_set(AppSet::Draw));
+            .init_resource::<ViewOptions>()
+            .add_systems(
+                Update,
+                (timeline_bar, campath_panel, options_panel, composition_overlay)
+                    .in_set(AppSet::Draw),
+            );
     }
 }
 
 #[derive(Resource)]
 struct UiState {
     show_campath: bool,
+    show_options: bool,
 }
 
 impl Default for UiState {
     fn default() -> Self {
-        Self { show_campath: true }
+        Self {
+            show_campath: true,
+            show_options: true,
+        }
+    }
+}
+
+/// Composition guide drawn over the 16:9 framed view.
+#[derive(Default, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum Composition {
+    #[default]
+    None,
+    Thirds,
+    /// Phi grid: divisions at 0.382 / 0.618.
+    Golden,
+    /// Fibonacci / golden spiral (orientation set by `spiral_rot`).
+    Spiral,
+    /// Corner-to-corner diagonals.
+    Diagonal,
+    /// Dead-center crosshair.
+    Center,
+}
+
+/// Overlay/gizmo toggles shared between the UI and the renderers. The view is already
+/// locked to 16:9 by the camera viewport, so `aspect` is a further cinematic crop drawn
+/// inside that frame, not a first letterbox.
+#[derive(Resource)]
+pub(crate) struct ViewOptions {
+    /// Player collision AABB wireframes (also toggled with B).
+    pub(crate) show_aabb: bool,
+    /// The 3D campath polyline + keyframe frustums.
+    pub(crate) show_campath: bool,
+    pub(crate) composition: Composition,
+    /// Golden-spiral orientation, 0..3 (the four corner flips).
+    pub(crate) spiral_rot: u8,
+    /// Draw the phi grid under the golden spiral.
+    pub(crate) spiral_grid: bool,
+    /// Preview letterbox to a narrower ratio (2.39 etc.), or `None` for the full 16:9.
+    /// Preview only: it does not change FOV or the exported campath.
+    pub(crate) aspect: Option<f32>,
+}
+
+impl Default for ViewOptions {
+    fn default() -> Self {
+        Self {
+            show_aabb: true,
+            show_campath: true,
+            composition: Composition::None,
+            spiral_rot: 0,
+            spiral_grid: false,
+            aspect: None,
+        }
     }
 }
 
@@ -391,6 +448,223 @@ fn keyframe_detail(
             path.with_keyframe(id, |k| k.fov = fov);
         }
     });
+}
+
+fn options_panel(
+    mut contexts: EguiContexts,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut ui_state: ResMut<UiState>,
+    mut opts: ResMut<ViewOptions>,
+) {
+    if keys.just_pressed(KeyCode::F3) {
+        ui_state.show_options = !ui_state.show_options;
+    }
+    if !ui_state.show_options {
+        return;
+    }
+    let ctx = contexts.ctx_mut();
+
+    egui::Window::new("View options")
+        .resizable(false)
+        .anchor(egui::Align2::LEFT_TOP, egui::vec2(12.0, 12.0))
+        .show(ctx, |ui| {
+            ui.checkbox(&mut opts.show_aabb, "Player boxes (B)");
+            ui.checkbox(&mut opts.show_campath, "Campath path");
+
+            ui.separator();
+            ui.label("Composition guide");
+            ui.horizontal_wrapped(|ui| {
+                ui.selectable_value(&mut opts.composition, Composition::None, "Off");
+                ui.selectable_value(&mut opts.composition, Composition::Thirds, "Thirds");
+                ui.selectable_value(&mut opts.composition, Composition::Golden, "Golden");
+                ui.selectable_value(&mut opts.composition, Composition::Spiral, "Spiral");
+                ui.selectable_value(&mut opts.composition, Composition::Diagonal, "Diagonal");
+                ui.selectable_value(&mut opts.composition, Composition::Center, "Center");
+            });
+            if opts.composition == Composition::Spiral {
+                ui.horizontal(|ui| {
+                    if ui.button("Rotate spiral").clicked() {
+                        opts.spiral_rot = (opts.spiral_rot + 1) % 4;
+                    }
+                    ui.checkbox(&mut opts.spiral_grid, "with grid");
+                });
+            }
+
+            ui.separator();
+            ui.label("Aspect mask")
+                .on_hover_text("Preview letterbox inside the 16:9 view. Does not change FOV or export.");
+            ui.horizontal_wrapped(|ui| {
+                ui.selectable_value(&mut opts.aspect, None, "16:9");
+                ui.selectable_value(&mut opts.aspect, Some(1.85), "1.85");
+                ui.selectable_value(&mut opts.aspect, Some(2.0), "2.00");
+                ui.selectable_value(&mut opts.aspect, Some(2.39), "2.39");
+            });
+        });
+}
+
+/// Draw the selected composition guide and any aspect mask over the framed view. The
+/// camera already crops to 16:9, so the guide aligns to that rect, not the whole window.
+fn composition_overlay(mut contexts: EguiContexts, opts: Res<ViewOptions>) {
+    if opts.composition == Composition::None && opts.aspect.is_none() {
+        return;
+    }
+    let ctx = contexts.ctx_mut();
+    let screen = ctx.screen_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Background,
+        egui::Id::new("composition"),
+    ));
+
+    // Largest 16:9 rect inside the window, matching enforce_16_9_viewport.
+    let mut frame = fit_aspect(screen, 16.0 / 9.0);
+    // A narrower ratio letterboxes inside the 16:9 frame; paint the bars over it.
+    if let Some(ar) = opts.aspect {
+        let inner = fit_aspect(frame, ar);
+        let bar = egui::Color32::from_black_alpha(235);
+        for r in bars_around(frame, inner) {
+            painter.rect_filled(r, 0.0, bar);
+        }
+        frame = inner;
+    }
+
+    let stroke = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(110));
+    let (l, r, t, b) = (frame.left(), frame.right(), frame.top(), frame.bottom());
+    let (w, h) = (frame.width(), frame.height());
+    let vline = |x: f32, p: &egui::Painter| {
+        p.line_segment([egui::pos2(x, t), egui::pos2(x, b)], stroke);
+    };
+    let hline = |y: f32, p: &egui::Painter| {
+        p.line_segment([egui::pos2(l, y), egui::pos2(r, y)], stroke);
+    };
+
+    match opts.composition {
+        Composition::None => {}
+        Composition::Thirds => {
+            for i in 1..3 {
+                vline(l + w * i as f32 / 3.0, &painter);
+                hline(t + h * i as f32 / 3.0, &painter);
+            }
+        }
+        Composition::Golden => {
+            for f in [0.382, 0.618] {
+                vline(l + w * f, &painter);
+                hline(t + h * f, &painter);
+            }
+        }
+        Composition::Spiral => {
+            if opts.spiral_grid {
+                for f in [0.382, 0.618] {
+                    vline(l + w * f, &painter);
+                    hline(t + h * f, &painter);
+                }
+            }
+            // Points are normalized [0,1]^2; stretch them to fill the frame.
+            let pts: Vec<egui::Pos2> = golden_spiral_norm(opts.spiral_rot)
+                .into_iter()
+                .map(|p| egui::pos2(l + p.x * w, t + p.y * h))
+                .collect();
+            painter.add(egui::Shape::line(pts, stroke));
+        }
+        Composition::Diagonal => {
+            painter.line_segment([frame.left_top(), frame.right_bottom()], stroke);
+            painter.line_segment([frame.right_top(), frame.left_bottom()], stroke);
+        }
+        Composition::Center => {
+            let c = frame.center();
+            vline(c.x, &painter);
+            hline(c.y, &painter);
+        }
+    }
+}
+
+/// Golden-spiral polyline in normalized `[0,1]^2`, ready to stretch onto any frame.
+///
+/// Built the classic way: start from a golden rectangle (phi:1), peel off the largest
+/// square each step, and draw the quarter-circle arc inside it. Successive squares shrink
+/// by 1/phi and rotate 90 degrees, so the arcs chain into the spiral. The construction is
+/// self-similar only in a true golden rectangle, so we build there and normalize; the
+/// caller's stretch to a 16:9 (or masked) frame matches how editors show this overlay.
+/// `rot` (0..3) flips the result into each corner.
+fn golden_spiral_norm(rot: u8) -> Vec<egui::Pos2> {
+    const PHI: f32 = 1.618_034;
+    const ARC_SEGS: usize = 24;
+    const STEPS: usize = 13;
+
+    let (mut x0, mut y0, mut x1, mut y1) = (0.0f32, 0.0, PHI, 1.0);
+    let mut pts: Vec<egui::Pos2> = Vec::with_capacity(STEPS * (ARC_SEGS + 1));
+
+    for i in 0..STEPS {
+        // Per step: the square's pivot corner, the arc's start/end, and the leftover rect.
+        let (pivot, start, end, next) = match i % 4 {
+            0 => {
+                let s = y1 - y0; // square on the left
+                ((x0 + s, y1), (x0, y1), (x0 + s, y0), (x0 + s, y0, x1, y1))
+            }
+            1 => {
+                let s = x1 - x0; // square on top
+                ((x0, y0 + s), (x0, y0), (x1, y0 + s), (x0, y0 + s, x1, y1))
+            }
+            2 => {
+                let s = y1 - y0; // square on the right
+                ((x1 - s, y0), (x1, y0), (x1 - s, y1), (x0, y0, x1 - s, y1))
+            }
+            _ => {
+                let s = x1 - x0; // square on the bottom
+                ((x1, y1 - s), (x1, y1), (x0, y1 - s), (x0, y0, x1, y1 - s))
+            }
+        };
+
+        let r = ((start.0 - pivot.0).powi(2) + (start.1 - pivot.1).powi(2)).sqrt();
+        let a0 = (start.1 - pivot.1).atan2(start.0 - pivot.0);
+        let a1 = (end.1 - pivot.1).atan2(end.0 - pivot.0);
+        // Sweep the short way; the two corners are always a quarter turn apart.
+        let mut d = a1 - a0;
+        if d > std::f32::consts::PI {
+            d -= std::f32::consts::TAU;
+        } else if d < -std::f32::consts::PI {
+            d += std::f32::consts::TAU;
+        }
+        for k in 0..=ARC_SEGS {
+            let a = a0 + d * (k as f32 / ARC_SEGS as f32);
+            pts.push(egui::pos2(pivot.0 + r * a.cos(), pivot.1 + r * a.sin()));
+        }
+        (x0, y0, x1, y1) = next;
+    }
+
+    let flip_x = rot == 1 || rot == 3;
+    let flip_y = rot == 2 || rot == 3;
+    for p in pts.iter_mut() {
+        p.x /= PHI; // [0, phi] -> [0, 1]
+        if flip_x {
+            p.x = 1.0 - p.x;
+        }
+        if flip_y {
+            p.y = 1.0 - p.y;
+        }
+    }
+    pts
+}
+
+/// Largest rect of aspect `ar` (width/height) centered inside `outer`.
+fn fit_aspect(outer: egui::Rect, ar: f32) -> egui::Rect {
+    let (ow, oh) = (outer.width(), outer.height());
+    let (w, h) = if ow / oh > ar {
+        (oh * ar, oh)
+    } else {
+        (ow, ow / ar)
+    };
+    egui::Rect::from_center_size(outer.center(), egui::vec2(w, h))
+}
+
+/// The four border rects of `outer` left uncovered by `inner` (letterbox bars).
+fn bars_around(outer: egui::Rect, inner: egui::Rect) -> [egui::Rect; 4] {
+    use egui::{pos2, Rect};
+    [
+        Rect::from_min_max(outer.min, pos2(outer.max.x, inner.min.y)), // top
+        Rect::from_min_max(pos2(outer.min.x, inner.max.y), outer.max), // bottom
+        Rect::from_min_max(pos2(outer.min.x, inner.min.y), pos2(inner.min.x, inner.max.y)), // left
+        Rect::from_min_max(pos2(inner.max.x, inner.min.y), pos2(outer.max.x, inner.max.y)), // right
+    ]
 }
 
 fn format_time(tick: u32, interval: f32) -> String {

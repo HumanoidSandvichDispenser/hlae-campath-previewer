@@ -11,13 +11,10 @@ use crate::app::AppSet;
 use crate::coords::{gltf_stand_up, hammer_to_world_quat};
 use crate::demo::{interp_fraction, lerp_angle_deg, ActiveDemo, Playback};
 use crate::map::WorldRoot;
+use crate::ui::ViewOptions;
 
 const PLAYER_POOL: usize = 32;
 const DEATH_START_ALPHA: f32 = 0.5;
-
-/// AABB wireframe toggle (B).
-#[derive(Resource)]
-struct ShowAabb(bool);
 
 /// Preloaded player scenes keyed by (class, team). class 1..=9, team 2=red / 3=blue.
 #[derive(Resource)]
@@ -45,8 +42,7 @@ pub(crate) struct PlayersPlugin;
 
 impl Plugin for PlayersPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(ShowAabb(true))
-            .add_systems(Startup, players_setup.after(crate::map::map_setup))
+        app.add_systems(Startup, players_setup.after(crate::map::map_setup))
             .add_systems(Update, toggle_aabb.in_set(AppSet::Input))
             .add_systems(
                 Update,
@@ -99,9 +95,9 @@ fn players_setup(mut commands: Commands, asset_server: Res<AssetServer>, root: R
     });
 }
 
-fn toggle_aabb(keys: Res<ButtonInput<KeyCode>>, mut show_aabb: ResMut<ShowAabb>) {
+fn toggle_aabb(keys: Res<ButtonInput<KeyCode>>, mut opts: ResMut<ViewOptions>) {
     if keys.just_pressed(KeyCode::KeyB) {
-        show_aabb.0 = !show_aabb.0;
+        opts.show_aabb = !opts.show_aabb;
     }
 }
 
@@ -278,12 +274,12 @@ fn fade_dead_players(
 /// Wireframe collision AABB per live player. Axis-aligned in Hammer space, so it gets
 /// the same world-root rotation the players do.
 fn draw_player_aabb(
-    show: Res<ShowAabb>,
+    opts: Res<ViewOptions>,
     pb: Res<Playback>,
     demo_res: Res<ActiveDemo>,
     mut gizmos: Gizmos,
 ) {
-    if !show.0 {
+    if !opts.show_aabb {
         return;
     }
     let Some(frame) = demo_res.0.frame_at(pb.tick as u32) else {
