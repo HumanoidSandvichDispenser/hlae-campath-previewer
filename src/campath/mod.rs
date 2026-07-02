@@ -9,7 +9,7 @@ use bevy::prelude::*;
 use crate::app::AppSet;
 use crate::camera::{FlyCam, DEFAULT_FOV};
 use crate::coords::{hammer_to_world_quat, world_to_hammer_quat};
-use crate::demo::{ActiveDemo, DemoPath, Playback};
+use crate::demo::{ActiveDemo, DemoPath, DemoSource, Playback};
 
 pub struct CampathPlugin;
 
@@ -75,6 +75,23 @@ impl Campath {
     pub(crate) fn clear(&mut self) {
         self.keyframes.clear();
         self.selected = None;
+        self.dirty = true;
+    }
+
+    /// Replace all keyframes with imported ones, assigning fresh ids, and set interp.
+    pub(crate) fn load_imported(
+        &mut self,
+        keyframes: Vec<spline::Keyframe>,
+        interp: spline::CampathInterp,
+    ) {
+        self.keyframes.clear();
+        self.selected = None;
+        self.interp = interp;
+        for mut kf in keyframes {
+            kf.id = self.alloc_id();
+            self.keyframes.push(kf);
+        }
+        self.keyframes.sort_by_key(|k| k.tick);
         self.dirty = true;
     }
 
@@ -162,13 +179,13 @@ fn campath_input(
     }
 
     if keys.just_pressed(KeyCode::F5) {
-        export_campath(&path, &demo_path.0, demo_res.0.interval_per_tick());
+        export_campath(&path, &demo_path.0, demo_res.0.as_ref());
     }
 }
 
 /// Write the campath's XML + VDM next to the demo, named from `demo_stem`. Needs at
 /// least 2 keyframes; logs what it wrote (or why it didn't).
-pub(crate) fn export_campath(path: &Campath, demo_stem: &str, interval_per_tick: f32) {
+pub(crate) fn export_campath(path: &Campath, demo_stem: &str, demo: &dyn DemoSource) {
     if path.keyframes.len() < 2 {
         eprintln!("[campath] need >= 2 keyframes to export");
         return;
@@ -179,7 +196,10 @@ pub(crate) fn export_campath(path: &Campath, demo_stem: &str, interval_per_tick:
         .unwrap_or("campath");
     let xml_name = format!("{stem}_campath.xml");
     let vdm_name = format!("{stem}.vdm");
-    let xml = export::to_hlae_campath_xml(&path.keyframes, &path.interp, interval_per_tick);
+    let interval = demo.interval_per_tick();
+    let xml = export::to_hlae_campath_xml(&path.keyframes, &path.interp, interval, |t| {
+        demo.demo_to_server_tick(t as i64)
+    });
     let vdm = export::to_vdm(&path.keyframes, &xml_name);
     let cwd = std::env::current_dir().unwrap_or_default();
     match (std::fs::write(&xml_name, xml), std::fs::write(&vdm_name, vdm)) {
@@ -188,6 +208,46 @@ pub(crate) fn export_campath(path: &Campath, demo_stem: &str, interval_per_tick:
         }
         (a, b) => eprintln!("[campath] export failed: {a:?} {b:?}"),
     }
+}
+
+/// Write just the campath XML to `xml_path`.
+pub(crate) fn export_xml_to(
+    path: &Campath,
+    xml_path: &std::path::Path,
+    demo: &dyn DemoSource,
+) -> std::io::Result<()> {
+    let xml =
+        export::to_hlae_campath_xml(&path.keyframes, &path.interp, demo.interval_per_tick(), |t| {
+            demo.demo_to_server_tick(t as i64)
+        });
+    std::fs::write(xml_path, xml)
+}
+
+/// Write just the VDM to `vdm_path`. `xml_file_name` is the campath file the VDM tells
+/// HLAE to load (bare file name, no path).
+pub(crate) fn export_vdm_to(
+    path: &Campath,
+    vdm_path: &std::path::Path,
+    xml_file_name: &str,
+) -> std::io::Result<()> {
+    let vdm = export::to_vdm(&path.keyframes, xml_file_name);
+    std::fs::write(vdm_path, vdm)
+}
+
+/// Load keyframes + interp from an HLAE campath XML into `path`, replacing what's there.
+pub(crate) fn import_campath(
+    path: &mut Campath,
+    xml_path: &std::path::Path,
+    demo: &dyn DemoSource,
+) -> anyhow::Result<usize> {
+    let xml = std::fs::read_to_string(xml_path)?;
+    let (keyframes, interp) =
+        export::from_hlae_campath_xml(&xml, demo.interval_per_tick(), |s| {
+            demo.server_to_demo_tick(s)
+        })?;
+    let n = keyframes.len();
+    path.load_imported(keyframes, interp);
+    Ok(n)
 }
 
 fn campath_recompile(mut path: ResMut<Campath>) {

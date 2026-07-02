@@ -43,10 +43,11 @@ fn main() -> anyhow::Result<()> {
     let bytes = demo::load_demo_bytes(&demo_path)?;
     let data = demo::parse(&bytes)?;
     eprintln!(
-        "[previewer] parsed: {:.4}s/tick, max_tick={}, map={}",
+        "[previewer] parsed: {:.4}s/tick, max_tick={}, map={}, first_curtime_tick={}",
         demo::DemoSource::interval_per_tick(&data),
         demo::DemoSource::max_tick(&data),
         data.map_name(),
+        demo::DemoSource::demo_to_server_tick(&data, 1),
     );
 
     // Prefer an explicit CLI map; otherwise resolve one from the demo header against the

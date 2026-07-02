@@ -15,6 +15,9 @@ edition = "2021"
 tf-demo-parser = "0.6.4"
 anyhow = "1"
 bevy_egui = { version = "0.28", default-features = false, features = ["render", "default_fonts"] }
+# Native file dialogs for campath import/export, and a read-only XML parser for import.
+rfd = "0.14"
+roxmltree = "0.20"
 
 # Trim default features: drop audio (avoids an alsa system-lib dep on the target)
 # but keep rendering, gltf, winit, and x11 so the binary runs on a normal desktop.

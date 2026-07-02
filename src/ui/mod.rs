@@ -8,7 +8,7 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use crate::app::AppSet;
 use crate::camera::FlyCam;
 use crate::campath::spline::{FovInterp, PositionInterp, RotationInterp};
-use crate::campath::{capture_pose, export_campath, Campath};
+use crate::campath::{capture_pose, export_vdm_to, export_xml_to, import_campath, Campath};
 use crate::coords::hammer_to_world_quat;
 use crate::demo::{ActiveDemo, DemoPath, Playback, SeekTo};
 
@@ -263,12 +263,57 @@ fn campath_panel(
 
             keyframe_list(ui, &mut path, &mut seek, interval, cur_tick, &cam_q);
 
-            if path.keyframes.len() >= 2 {
-                ui.separator();
-                if ui.button("Export .xml + .vdm").clicked() {
-                    export_campath(&path, &demo_path.0, interval);
+            ui.separator();
+            let stem = std::path::Path::new(&demo_path.0)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("campath")
+                .to_string();
+            ui.horizontal(|ui| {
+                if ui.button("Import XML").clicked() {
+                    if let Some(file) = rfd::FileDialog::new()
+                        .add_filter("campath xml", &["xml"])
+                        .pick_file()
+                    {
+                        match import_campath(&mut path, &file, demo_res.0.as_ref()) {
+                            Ok(n) => eprintln!("[campath] imported {n} keyframes from {}", file.display()),
+                            Err(e) => eprintln!("[campath] import failed: {e}"),
+                        }
+                    }
                 }
-            }
+                ui.add_enabled_ui(path.keyframes.len() >= 2, |ui| {
+                    if ui.button("Export XML").clicked() {
+                        if let Some(file) = rfd::FileDialog::new()
+                            .add_filter("campath xml", &["xml"])
+                            .set_file_name(format!("{stem}_campath.xml"))
+                            .save_file()
+                        {
+                            match export_xml_to(&path, &file, demo_res.0.as_ref()) {
+                                Ok(_) => eprintln!("[campath] wrote {}", file.display()),
+                                Err(e) => eprintln!("[campath] export failed: {e}"),
+                            }
+                        }
+                    }
+                    if ui.button("Export VDM").clicked() {
+                        if let Some(file) = rfd::FileDialog::new()
+                            .add_filter("vdm", &["vdm"])
+                            .set_file_name(format!("{stem}.vdm"))
+                            .save_file()
+                        {
+                            // The VDM loads a campath file named after the VDM's own stem.
+                            let xml_name = file
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .map(|s| format!("{s}_campath.xml"))
+                                .unwrap_or_else(|| format!("{stem}_campath.xml"));
+                            match export_vdm_to(&path, &file, &xml_name) {
+                                Ok(_) => eprintln!("[campath] wrote {} (loads {xml_name})", file.display()),
+                                Err(e) => eprintln!("[campath] vdm export failed: {e}"),
+                            }
+                        }
+                    }
+                });
+            });
 
             // Editor for the selected keyframe, in the same window below the list.
             if let Some(id) = path.selected {
