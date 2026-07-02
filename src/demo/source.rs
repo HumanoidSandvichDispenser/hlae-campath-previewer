@@ -1,63 +1,42 @@
-//! One-pass demo parse into a dense per-tick cache.
-//!
-//! GameStateAnalyser is forward-only and delta-based: it mutates a single running
-//! GameState as it walks packets, with no random access and no memoization. So we do
-//! the one sequential pass it forces and snapshot the roster every tick into a Vec.
-//! After this, any tick is O(1) — which is what seeking + campath sampling needs.
+//! Per-tick access to a parsed demo.
+
+use bevy::prelude::*;
+use std::collections::HashMap;
 
 use tf_demo_parser::demo::parser::gamestateanalyser::{GameStateAnalyser, PlayerState};
 use tf_demo_parser::{Demo, DemoParser};
 
-/// A single player's transform at one tick. Positions are raw TF2 world units
-/// (Hammer coords, Z-up); the renderer applies the world->engine transform.
-#[derive(Clone, Copy, Debug)]
-pub struct PlayerSnap {
-    pub entity: u32,
-    pub pos: [f32; 3],
-    pub yaw: f32,
-    pub pitch: f32,
-    pub team: u8,  // 2 = red, 3 = blue
-    pub class: u8, // 1..=9, 0 = unknown
-    pub health: u16,
-    /// Collision AABB corners, relative to the player origin (feet), raw Hammer units.
-    /// From m_vecMaxsPreScaled etc. `max.z` shrinks ~82->62 when ducking.
-    pub bounds_min: [f32; 3],
-    pub bounds_max: [f32; 3],
-    pub alive: bool,
-    /// Ticks since this player last died (0 while alive). Drives the death fade,
-    /// tick-based so it's stable under seeking. u32::MAX = never seen alive.
-    pub death_age: u32,
+use super::data::{Frame, PlayerSnap, ProjectileSnap};
+
+/// Per-tick access to demo state. Methods take `&self` so systems reading the demo can
+/// run in parallel; implementations that need to mutate (e.g. a lazy decode cache) do
+/// so behind interior mutability.
+pub trait DemoSource: Send + Sync + 'static {
+    /// Nearest frame at or before `tick`.
+    fn frame_at(&self, tick: u32) -> Option<&Frame>;
+    fn max_tick(&self) -> u32;
+    /// Seconds per tick (~0.015 for TF2).
+    fn interval_per_tick(&self) -> f32;
+    /// First frame with players in it.
+    fn first_populated_frame(&self) -> Option<&Frame>;
+    /// Approximate memory held by cached frames, in bytes.
+    fn approx_bytes(&self) -> usize;
+    /// Visit frames with tick in `[lo, hi]`, in order.
+    fn frames_in_range(&self, lo: u32, hi: u32, f: &mut dyn FnMut(&Frame));
 }
 
-/// A projectile's transform at one tick. Positions are raw Hammer units (Z-up).
-#[derive(Clone, Copy, Debug)]
-pub struct ProjectileSnap {
-    pub entity: u32,
-    pub pos: [f32; 3],
-    /// Source euler angles in degrees: [pitch, yaw, roll].
-    pub rotation: [f32; 3],
-    pub team: u8, // 2 = red, 3 = blue
-    /// ProjectileType as u8: 0 rocket, 1 healing arrow, 2 sticky, 3 pipe, 4 flare,
-    /// 5 loose cannon, 7 unknown.
-    pub ty: u8,
-    pub critical: bool,
+#[derive(Resource)]
+pub struct ActiveDemo(pub Box<dyn DemoSource>);
+
+/// The whole demo in memory, one `Frame` per tick. `frame_at` is a binary search.
+pub struct DenseDemoSource {
+    frames: Vec<Frame>,
+    interval_per_tick: f32,
+    max_tick: u32,
 }
 
-pub struct Frame {
-    pub tick: u32,
-    pub players: Vec<PlayerSnap>,
-    pub projectiles: Vec<ProjectileSnap>,
-}
-
-pub struct DemoData {
-    pub frames: Vec<Frame>,
-    pub interval_per_tick: f32,
-    pub max_tick: u32,
-}
-
-impl DemoData {
-    /// Nearest frame at or before `tick` (frames are tick-sorted). Cheap binary search.
-    pub fn frame_at(&self, tick: u32) -> Option<&Frame> {
+impl DemoSource for DenseDemoSource {
+    fn frame_at(&self, tick: u32) -> Option<&Frame> {
         if self.frames.is_empty() {
             return None;
         }
@@ -68,9 +47,39 @@ impl DemoData {
         };
         self.frames.get(idx)
     }
+
+    fn max_tick(&self) -> u32 {
+        self.max_tick
+    }
+
+    fn interval_per_tick(&self) -> f32 {
+        self.interval_per_tick
+    }
+
+    fn first_populated_frame(&self) -> Option<&Frame> {
+        self.frames.iter().find(|f| !f.players.is_empty())
+    }
+
+    fn approx_bytes(&self) -> usize {
+        self.frames
+            .iter()
+            .map(|f| {
+                f.players.len() * std::mem::size_of::<PlayerSnap>()
+                    + f.projectiles.len() * std::mem::size_of::<ProjectileSnap>()
+            })
+            .sum()
+    }
+
+    fn frames_in_range(&self, lo: u32, hi: u32, f: &mut dyn FnMut(&Frame)) {
+        for frame in self.frames.iter().filter(|fr| fr.tick >= lo && fr.tick <= hi) {
+            f(frame);
+        }
+    }
 }
 
-pub fn parse(bytes: &[u8]) -> anyhow::Result<DemoData> {
+/// One-pass parse into a `DenseDemoSource`. GameStateAnalyser only walks forward
+/// (entities are delta-compressed), so: one sequential pass, snapshot every tick.
+pub fn parse(bytes: &[u8]) -> anyhow::Result<DenseDemoSource> {
     let demo = Demo::new(bytes);
     let (_header, mut ticker) =
         DemoParser::new_with_analyser(demo.get_stream(), GameStateAnalyser::default()).ticker()?;
@@ -79,7 +88,7 @@ pub fn parse(bytes: &[u8]) -> anyhow::Result<DemoData> {
     let mut interval_per_tick = 0.0_f32;
     let mut last_tick = u32::MAX;
     // entity -> last tick it was alive, for computing death age.
-    let mut last_alive: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    let mut last_alive: HashMap<u32, u32> = HashMap::new();
 
     loop {
         let more = ticker.tick()?;
@@ -91,7 +100,7 @@ pub fn parse(bytes: &[u8]) -> anyhow::Result<DemoData> {
             let players = state
                 .players
                 .iter()
-                .filter(|p| matches!(p.team as u8, 2 | 3)) // red/blue only
+                .filter(|p| matches!(p.team as u8, 2 | 3))
                 .map(|p| {
                     let entity = u32::from(p.entity);
                     // m_lifeState is the authoritative death signal; health goes stale
@@ -148,7 +157,7 @@ pub fn parse(bytes: &[u8]) -> anyhow::Result<DemoData> {
         interval_per_tick = 0.015; // TF2 nominal fallback
     }
 
-    Ok(DemoData {
+    Ok(DenseDemoSource {
         frames,
         interval_per_tick,
         max_tick,
