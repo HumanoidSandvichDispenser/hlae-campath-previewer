@@ -28,7 +28,7 @@ pub enum FovInterp {
     Cubic,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct CampathInterp {
     pub position: PositionInterp,
     pub rotation: RotationInterp,
@@ -50,6 +50,9 @@ impl Default for CampathInterp {
 /// fov is vertical degrees (what the bevy PerspectiveProjection carries).
 #[derive(Clone, Copy)]
 pub struct Keyframe {
+    /// Stable identity for the UI, so selection survives retiming or reordering.
+    /// Interpolation ignores it.
+    pub id: u64,
     pub tick: u32,
     pub position: [f32; 3],
     pub quaternion: [f32; 4], // x, y, z, w

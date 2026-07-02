@@ -16,6 +16,7 @@ mod demo;
 mod diagnostics;
 mod entities;
 mod map;
+mod ui;
 
 use bevy::prelude::*;
 
@@ -26,6 +27,7 @@ use demo::{ActiveDemo, DemoPath, DemoPlugin};
 use diagnostics::DiagnosticsPlugin;
 use entities::EntitiesPlugin;
 use map::{MapAssetPath, MapPlugin};
+use ui::UiPlugin;
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -70,6 +72,7 @@ fn main() -> anyhow::Result<()> {
             CampathPlugin,
             DemoPlugin,
             DiagnosticsPlugin,
+            UiPlugin,
             AppPlugin,
         ))
         .run();

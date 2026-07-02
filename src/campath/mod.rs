@@ -32,6 +32,91 @@ pub(crate) struct Campath {
     pub(crate) compiled: Option<spline::CompiledCampath>,
     pub(crate) dirty: bool,
     pub(crate) following: bool,
+    pub(crate) selected: Option<u64>,
+    next_id: u64,
+}
+
+impl Campath {
+    fn alloc_id(&mut self) -> u64 {
+        self.next_id += 1;
+        self.next_id
+    }
+
+    /// Add a keyframe at `tick`, or overwrite the one already there (keeping its id).
+    /// Returns the keyframe's id.
+    pub(crate) fn set_at_tick(
+        &mut self,
+        tick: u32,
+        position: [f32; 3],
+        quaternion: [f32; 4],
+        fov: f32,
+    ) -> u64 {
+        self.dirty = true;
+        if let Some(i) = self.keyframes.iter().position(|k| k.tick == tick) {
+            let id = self.keyframes[i].id;
+            self.keyframes[i] = spline::Keyframe { id, tick, position, quaternion, fov };
+            id
+        } else {
+            let id = self.alloc_id();
+            self.keyframes.push(spline::Keyframe { id, tick, position, quaternion, fov });
+            self.keyframes.sort_by_key(|k| k.tick);
+            id
+        }
+    }
+
+    pub(crate) fn delete(&mut self, id: u64) {
+        self.keyframes.retain(|k| k.id != id);
+        if self.selected == Some(id) {
+            self.selected = None;
+        }
+        self.dirty = true;
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.keyframes.clear();
+        self.selected = None;
+        self.dirty = true;
+    }
+
+    fn index_of(&self, id: u64) -> Option<usize> {
+        self.keyframes.iter().position(|k| k.id == id)
+    }
+
+    /// Move a keyframe to `tick`. Fails (returns false) if another keyframe is already
+    /// there, leaving the path untouched.
+    pub(crate) fn retime(&mut self, id: u64, tick: u32) -> bool {
+        if self.keyframes.iter().any(|k| k.id != id && k.tick == tick) {
+            return false;
+        }
+        if let Some(i) = self.index_of(id) {
+            self.keyframes[i].tick = tick;
+            self.keyframes.sort_by_key(|k| k.tick);
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn with_keyframe(&mut self, id: u64, f: impl FnOnce(&mut spline::Keyframe)) {
+        if let Some(i) = self.index_of(id) {
+            f(&mut self.keyframes[i]);
+            self.dirty = true;
+        }
+    }
+}
+
+/// Camera pose in Source Z-up: position, quaternion [x,y,z,w], vertical fov in degrees.
+/// This is what a keyframe stores.
+pub(crate) fn capture_pose(tf: &Transform, proj: &Projection) -> ([f32; 3], [f32; 4], f32) {
+    let inv = world_to_hammer_quat();
+    let pos = inv * tf.translation;
+    let q = inv * tf.rotation;
+    let fov = match proj {
+        Projection::Perspective(p) => p.fov.to_degrees(),
+        _ => DEFAULT_FOV.to_degrees(),
+    };
+    ([pos.x, pos.y, pos.z], [q.x, q.y, q.z, q.w], fov)
 }
 
 /// V add keyframe, L delete highest-tick, P follow, F5 export XML+VDM.
@@ -46,27 +131,9 @@ fn campath_input(
     if keys.just_pressed(KeyCode::KeyV) {
         if let Ok((tf, proj)) = cam_q.get_single() {
             let tick = pb.tick.round() as u32;
-            let inv = world_to_hammer_quat();
-            let pos = inv * tf.translation;
-            let q = inv * tf.rotation;
-            let fov = match proj {
-                Projection::Perspective(p) => p.fov.to_degrees(),
-                _ => DEFAULT_FOV.to_degrees(),
-            };
-            let kf = spline::Keyframe {
-                tick,
-                position: [pos.x, pos.y, pos.z],
-                quaternion: [q.x, q.y, q.z, q.w],
-                fov,
-            };
-            // One keyframe per tick: replace if this tick already has one.
-            if let Some(i) = path.keyframes.iter().position(|k| k.tick == tick) {
-                path.keyframes[i] = kf;
-            } else {
-                path.keyframes.push(kf);
-                path.keyframes.sort_by_key(|k| k.tick);
-            }
-            path.dirty = true;
+            let (pos, quat, fov) = capture_pose(tf, proj);
+            let id = path.set_at_tick(tick, pos, quat, fov);
+            path.selected = Some(id);
             eprintln!(
                 "[campath] keyframe @ tick {tick} (total {})",
                 path.keyframes.len()
@@ -75,9 +142,9 @@ fn campath_input(
     }
 
     if keys.just_pressed(KeyCode::KeyL) {
-        // Vec is tick-sorted, so pop removes the highest-tick keyframe.
-        if let Some(k) = path.keyframes.pop() {
-            path.dirty = true;
+        // Vec is tick-sorted, so the last one is the highest-tick keyframe.
+        if let Some(k) = path.keyframes.last().copied() {
+            path.delete(k.id);
             eprintln!(
                 "[campath] removed keyframe @ tick {} ({} left)",
                 k.tick,
@@ -95,35 +162,31 @@ fn campath_input(
     }
 
     if keys.just_pressed(KeyCode::F5) {
-        if path.keyframes.len() < 2 {
-            eprintln!("[campath] need >= 2 keyframes to export");
-        } else {
-            let stem = std::path::Path::new(&demo_path.0)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("campath");
-            let xml_name = format!("{stem}_campath.xml");
-            let vdm_name = format!("{stem}.vdm");
-            let xml = export::to_hlae_campath_xml(
-                &path.keyframes,
-                &path.interp,
-                demo_res.0.interval_per_tick(),
-            );
-            let vdm = export::to_vdm(&path.keyframes, &xml_name);
-            let cwd = std::env::current_dir().unwrap_or_default();
-            match (
-                std::fs::write(&xml_name, xml),
-                std::fs::write(&vdm_name, vdm),
-            ) {
-                (Ok(_), Ok(_)) => eprintln!(
-                    "[campath] exported {} + {} to {}",
-                    xml_name,
-                    vdm_name,
-                    cwd.display()
-                ),
-                (a, b) => eprintln!("[campath] export failed: {a:?} {b:?}"),
-            }
+        export_campath(&path, &demo_path.0, demo_res.0.interval_per_tick());
+    }
+}
+
+/// Write the campath's XML + VDM next to the demo, named from `demo_stem`. Needs at
+/// least 2 keyframes; logs what it wrote (or why it didn't).
+pub(crate) fn export_campath(path: &Campath, demo_stem: &str, interval_per_tick: f32) {
+    if path.keyframes.len() < 2 {
+        eprintln!("[campath] need >= 2 keyframes to export");
+        return;
+    }
+    let stem = std::path::Path::new(demo_stem)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("campath");
+    let xml_name = format!("{stem}_campath.xml");
+    let vdm_name = format!("{stem}.vdm");
+    let xml = export::to_hlae_campath_xml(&path.keyframes, &path.interp, interval_per_tick);
+    let vdm = export::to_vdm(&path.keyframes, &xml_name);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    match (std::fs::write(&xml_name, xml), std::fs::write(&vdm_name, vdm)) {
+        (Ok(_), Ok(_)) => {
+            eprintln!("[campath] exported {} + {} to {}", xml_name, vdm_name, cwd.display())
         }
+        (a, b) => eprintln!("[campath] export failed: {a:?} {b:?}"),
     }
 }
 
