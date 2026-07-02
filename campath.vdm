@@ -1,0 +1,10 @@
+demoactions
+{
+	"1"
+	{
+		factory "PlayCommands"
+		name "Load campath"
+		starttick "61461"
+		commands "mirv_campath clear; mirv_campath load campath_campath.xml; mirv_campath enabled 1"
+	}
+}

@@ -9,6 +9,7 @@ use crate::app::AppSet;
 use crate::camera::FlyCam;
 use crate::campath::spline::{FovInterp, PositionInterp, RotationInterp};
 use crate::campath::{capture_pose, export_campath, Campath};
+use crate::coords::hammer_to_world_quat;
 use crate::demo::{ActiveDemo, DemoPath, Playback, SeekTo};
 
 pub struct UiPlugin;
@@ -20,7 +21,13 @@ impl Plugin for UiPlugin {
             .init_resource::<ViewOptions>()
             .add_systems(
                 Update,
-                (timeline_bar, campath_panel, options_panel, composition_overlay)
+                (
+                    timeline_bar,
+                    campath_panel,
+                    options_panel,
+                    composition_overlay,
+                    player_name_overlay,
+                )
                     .in_set(AppSet::Draw),
             );
     }
@@ -66,6 +73,8 @@ pub(crate) struct ViewOptions {
     pub(crate) show_aabb: bool,
     /// The 3D campath polyline + keyframe frustums.
     pub(crate) show_campath: bool,
+    /// Floating name tags above each live player.
+    pub(crate) show_names: bool,
     pub(crate) composition: Composition,
     /// Golden-spiral orientation, 0..3 (the four corner flips).
     pub(crate) spiral_rot: u8,
@@ -81,6 +90,7 @@ impl Default for ViewOptions {
         Self {
             show_aabb: true,
             show_campath: true,
+            show_names: true,
             composition: Composition::None,
             spiral_rot: 0,
             spiral_grid: false,
@@ -469,6 +479,7 @@ fn options_panel(
         .anchor(egui::Align2::LEFT_TOP, egui::vec2(12.0, 12.0))
         .show(ctx, |ui| {
             ui.checkbox(&mut opts.show_aabb, "Player boxes (B)");
+            ui.checkbox(&mut opts.show_names, "Player names");
             ui.checkbox(&mut opts.show_campath, "Campath path");
 
             ui.separator();
@@ -643,6 +654,68 @@ fn golden_spiral_norm(rot: u8) -> Vec<egui::Pos2> {
         }
     }
     pts
+}
+
+/// Float each live player's name above their head, projected from the demo tick through
+/// the camera. Players sit in Hammer space under the rotated world root, so a name's
+/// world point is that rotation applied to the head position.
+fn player_name_overlay(
+    mut contexts: EguiContexts,
+    opts: Res<ViewOptions>,
+    pb: Res<Playback>,
+    demo_res: Res<ActiveDemo>,
+    cam_q: Query<(&Camera, &GlobalTransform), With<FlyCam>>,
+) {
+    if !opts.show_names {
+        return;
+    }
+    let Some(frame) = demo_res.0.frame_at(pb.tick as u32) else {
+        return;
+    };
+    let Ok((camera, cam_tf)) = cam_q.get_single() else {
+        return;
+    };
+    let Some(vp) = camera.logical_viewport_rect() else {
+        return;
+    };
+    let root_rot = hammer_to_world_quat();
+
+    let ctx = contexts.ctx_mut();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Background,
+        egui::Id::new("player_names"),
+    ));
+    let font = egui::FontId::proportional(14.0);
+
+    for p in &frame.players {
+        if !p.alive {
+            continue;
+        }
+        let Some(name) = demo_res.0.player_name(p.entity) else {
+            continue;
+        };
+        // A little above the crown so the tag clears the model.
+        let head = Vec3::new(p.pos[0], p.pos[1], p.pos[2] + p.bounds_max[2] + 12.0);
+        let Some(view) = camera.world_to_viewport(cam_tf, root_rot * head) else {
+            continue;
+        };
+        // world_to_viewport is viewport-relative; shift into window/egui space.
+        let pos = egui::pos2(vp.min.x + view.x, vp.min.y + view.y);
+
+        let color = if p.team == 2 {
+            egui::Color32::from_rgb(255, 130, 120)
+        } else {
+            egui::Color32::from_rgb(130, 175, 255)
+        };
+        painter.text(
+            pos + egui::vec2(1.0, 1.0),
+            egui::Align2::CENTER_BOTTOM,
+            name,
+            font.clone(),
+            egui::Color32::from_black_alpha(190),
+        );
+        painter.text(pos, egui::Align2::CENTER_BOTTOM, name, font.clone(), color);
+    }
 }
 
 /// Largest rect of aspect `ar` (width/height) centered inside `outer`.

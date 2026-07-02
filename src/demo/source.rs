@@ -14,6 +14,8 @@ use super::data::{Frame, PlayerSnap, ProjectileSnap};
 pub trait DemoSource: Send + Sync + 'static {
     /// Nearest frame at or before `tick`.
     fn frame_at(&self, tick: u32) -> Option<&Frame>;
+    /// Display name for a player entity, if the demo carried one.
+    fn player_name(&self, entity: u32) -> Option<&str>;
     /// First frame with a tick strictly greater than `tick`, for interpolating between
     /// snapshots. Pairs with `frame_at`.
     fn frame_after(&self, tick: u32) -> Option<&Frame>;
@@ -37,6 +39,9 @@ pub struct DenseDemoSource {
     interval_per_tick: f32,
     max_tick: u32,
     map: String,
+    /// Player entity id -> display name. Names are per-demo, not per-tick, so they live
+    /// here rather than in every `PlayerSnap`.
+    names: HashMap<u32, String>,
 }
 
 impl DenseDemoSource {
@@ -62,6 +67,10 @@ impl DemoSource for DenseDemoSource {
     fn frame_after(&self, tick: u32) -> Option<&Frame> {
         let idx = self.frames.partition_point(|f| f.tick <= tick);
         self.frames.get(idx)
+    }
+
+    fn player_name(&self, entity: u32) -> Option<&str> {
+        self.names.get(&entity).map(String::as_str)
     }
 
     fn max_tick(&self) -> u32 {
@@ -106,6 +115,8 @@ pub fn parse(bytes: &[u8]) -> anyhow::Result<DenseDemoSource> {
     let mut last_tick = u32::MAX;
     // entity -> last tick it was alive, for computing death age.
     let mut last_alive: HashMap<u32, u32> = HashMap::new();
+    // entity -> display name, filled the first time a player's user info shows up.
+    let mut names: HashMap<u32, String> = HashMap::new();
 
     loop {
         let more = ticker.tick()?;
@@ -114,6 +125,16 @@ pub fn parse(bytes: &[u8]) -> anyhow::Result<DenseDemoSource> {
 
         let tick: u32 = u32::from(state.tick);
         if tick != last_tick {
+            for p in &state.players {
+                let id = u32::from(p.entity);
+                if !names.contains_key(&id) {
+                    if let Some(info) = &p.info {
+                        if !info.name.is_empty() {
+                            names.insert(id, info.name.clone());
+                        }
+                    }
+                }
+            }
             let players = state
                 .players
                 .iter()
@@ -179,5 +200,6 @@ pub fn parse(bytes: &[u8]) -> anyhow::Result<DenseDemoSource> {
         interval_per_tick,
         max_tick,
         map,
+        names,
     })
 }
