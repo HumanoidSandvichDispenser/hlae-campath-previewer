@@ -1,7 +1,3 @@
-# Detached from the parent workspace on purpose: bevy pulls ~400 crates and we
-# don't want that in the main Cargo.lock. This is a throwaway spike to de-risk a
-# native (Rust + bevy) campath tool — parse a demo, render map + players at a tick,
-# free-fly camera. Nothing here is meant to be production.
 [package]
 name = "hlae-campath-previewer"
 version = "0.1.0"
@@ -10,12 +6,9 @@ edition = "2021"
 [workspace]
 
 [dependencies]
-# Same crate the web app's wasm parser is built from, and already used natively
-# in ../tf-log-demo-aligner. GameStateAnalyser gives us per-tick player positions.
 tf-demo-parser = "0.6.4"
 anyhow = "1"
 bevy_egui = { version = "0.28", default-features = false, features = ["render", "default_fonts"] }
-# Native file dialogs for campath import/export, and a read-only XML parser for import.
 rfd = "0.14"
 roxmltree = "0.20"
 
@@ -42,6 +35,5 @@ features = [
   "multi_threaded",
 ]
 
-# A spike still benefits from an optimized parse + render; opt the deps up.
 [profile.dev.package."*"]
 opt-level = 3
