@@ -19,6 +19,7 @@ mod map;
 mod ui;
 
 use bevy::prelude::*;
+use clap::Parser;
 
 use app::AppPlugin;
 use camera::CameraPlugin;
@@ -29,10 +30,21 @@ use entities::EntitiesPlugin;
 use map::{MapAssetPath, MapPlugin};
 use ui::UiPlugin;
 
+/// Native TF2 demo previewer + HLAE campath author.
+#[derive(Parser)]
+#[command(about, long_about = None)]
+struct Args {
+    /// Demo to load; `-` reads it from stdin.
+    #[arg(default_value = "assets/demo.dem")]
+    demo: String,
+    /// Map GLB to render; auto-resolved from the demo header if omitted.
+    map: Option<String>,
+}
+
 fn main() -> anyhow::Result<()> {
-    let mut args = std::env::args().skip(1);
-    let demo_path = args.next().unwrap_or_else(|| "assets/demo.dem".into());
-    let map_arg = args.next();
+    let args = Args::parse();
+    let demo_path = args.demo;
+    let map_arg = args.map;
 
     // "-" reads the demo from stdin; give exports a sensible stem in that case since
     // there's no filename to derive one from.

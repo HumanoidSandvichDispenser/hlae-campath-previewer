@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 tf-demo-parser = "0.6.4"
 anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 bevy_egui = { version = "0.28", default-features = false, features = ["render", "default_fonts"] }
 rfd = "0.14"
 roxmltree = "0.20"
