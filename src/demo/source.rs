@@ -143,7 +143,11 @@ impl DemoSource for DenseDemoSource {
     }
 
     fn frames_in_range(&self, lo: u32, hi: u32, f: &mut dyn FnMut(&Frame)) {
-        for frame in self.frames.iter().filter(|fr| fr.tick >= lo && fr.tick <= hi) {
+        for frame in self
+            .frames
+            .iter()
+            .filter(|fr| fr.tick >= lo && fr.tick <= hi)
+        {
             f(frame);
         }
     }
@@ -265,7 +269,10 @@ pub fn parse(bytes: &[u8]) -> anyhow::Result<DenseDemoSource> {
                         last_alive.insert(entity, tick);
                         0
                     } else {
-                        last_alive.get(&entity).map(|&a| tick - a).unwrap_or(u32::MAX)
+                        last_alive
+                            .get(&entity)
+                            .map(|&a| tick - a)
+                            .unwrap_or(u32::MAX)
                     };
                     PlayerSnap {
                         entity,

@@ -123,7 +123,10 @@ fn timeline_bar(
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button(if pb.playing { "pause" } else { "play" }).clicked() {
+                    if ui
+                        .button(if pb.playing { "pause" } else { "play" })
+                        .clicked()
+                    {
                         pb.playing = !pb.playing;
                     }
                     if ui.button("<< 50").clicked() {
@@ -164,9 +167,7 @@ fn timeline_bar(
                             }
                         }
                         Some(buf) => {
-                            let resp = ui.add(
-                                egui::TextEdit::singleline(buf).desired_width(64.0),
-                            );
+                            let resp = ui.add(egui::TextEdit::singleline(buf).desired_width(64.0));
                             if *edit_opened {
                                 resp.request_focus();
                                 *edit_opened = false;
@@ -282,7 +283,10 @@ fn campath_panel(
                         .pick_file()
                     {
                         match import_campath(&mut path, &file, demo_res.0.as_ref()) {
-                            Ok(n) => eprintln!("[campath] imported {n} keyframes from {}", file.display()),
+                            Ok(n) => eprintln!(
+                                "[campath] imported {n} keyframes from {}",
+                                file.display()
+                            ),
                             Err(e) => eprintln!("[campath] import failed: {e}"),
                         }
                     }
@@ -313,7 +317,10 @@ fn campath_panel(
                                 .map(|s| format!("{s}_campath.xml"))
                                 .unwrap_or_else(|| format!("{stem}_campath.xml"));
                             match export_vdm_to(&path, &file, &xml_name) {
-                                Ok(_) => eprintln!("[campath] wrote {} (loads {xml_name})", file.display()),
+                                Ok(_) => eprintln!(
+                                    "[campath] wrote {} (loads {xml_name})",
+                                    file.display()
+                                ),
                                 Err(e) => eprintln!("[campath] vdm export failed: {e}"),
                             }
                         }
@@ -423,7 +430,11 @@ fn keyframe_list(
                             }
                         }
                         if ui
-                            .add(egui::DragValue::new(&mut fov).range(1.0..=179.0).suffix(" fov"))
+                            .add(
+                                egui::DragValue::new(&mut fov)
+                                    .range(1.0..=179.0)
+                                    .suffix(" fov"),
+                            )
                             .changed()
                         {
                             path.with_keyframe(id, |k| k.fov = fov);
@@ -466,7 +477,9 @@ fn keyframe_detail(
     let mut tick = kf.tick as i32;
     ui.horizontal(|ui| {
         ui.label("Tick");
-        if ui.add(egui::DragValue::new(&mut tick).range(0..=i32::MAX)).changed()
+        if ui
+            .add(egui::DragValue::new(&mut tick).range(0..=i32::MAX))
+            .changed()
             && !path.retime(id, tick.max(0) as u32)
         {
             ui.colored_label(egui::Color32::from_rgb(230, 200, 120), "tick taken");
@@ -492,7 +505,9 @@ fn keyframe_detail(
     ui.label("Rotation (pitch / yaw / roll deg)");
     ui.horizontal(|ui| {
         let mut changed = false;
-        changed |= ui.add(egui::DragValue::new(&mut pitch).speed(0.5)).changed();
+        changed |= ui
+            .add(egui::DragValue::new(&mut pitch).speed(0.5))
+            .changed();
         changed |= ui.add(egui::DragValue::new(&mut yaw).speed(0.5)).changed();
         changed |= ui.add(egui::DragValue::new(&mut roll).speed(0.5)).changed();
         if changed {
@@ -505,7 +520,10 @@ fn keyframe_detail(
     let mut fov = kf.fov;
     ui.horizontal(|ui| {
         ui.label("FOV");
-        if ui.add(egui::DragValue::new(&mut fov).range(1.0..=179.0)).changed() {
+        if ui
+            .add(egui::DragValue::new(&mut fov).range(1.0..=179.0))
+            .changed()
+        {
             path.with_keyframe(id, |k| k.fov = fov);
         }
     });
@@ -554,8 +572,9 @@ fn options_panel(
             }
 
             ui.separator();
-            ui.label("Aspect mask")
-                .on_hover_text("Preview letterbox inside the 16:9 view. Does not change FOV or export.");
+            ui.label("Aspect mask").on_hover_text(
+                "Preview letterbox inside the 16:9 view. Does not change FOV or export.",
+            );
             ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(&mut opts.aspect, None, "16:9");
                 ui.selectable_value(&mut opts.aspect, Some(1.85), "1.85");
@@ -565,13 +584,16 @@ fn options_panel(
 
             ui.separator();
             let per_tick_ms = demo_res.0.interval_per_tick() * 1000.0;
-            let ticks = if per_tick_ms > 0.0 { opts.player_delay_ms / per_tick_ms } else { 0.0 };
-            ui.label("Player interp delay")
-                .on_hover_text(
-                    "Sample players/projectiles this far behind the playhead to match TF2's \
+            let ticks = if per_tick_ms > 0.0 {
+                opts.player_delay_ms / per_tick_ms
+            } else {
+                0.0
+            };
+            ui.label("Player interp delay").on_hover_text(
+                "Sample players/projectiles this far behind the playhead to match TF2's \
                      entity-interpolation lag in the final render. Camera is unaffected. \
                      15 ms (~1 tick) = cl_interp 0 + cl_interp_ratio 1; 100 ms = default lerp.",
-                );
+            );
             ui.horizontal(|ui| {
                 ui.add(
                     egui::Slider::new(&mut opts.player_delay_ms, 0.0..=120.0)
@@ -740,7 +762,11 @@ fn player_name_overlay(
         return;
     }
     // Match the player models' interpolation-delayed sampling so tags track heads.
-    let stick = crate::demo::delayed_tick(pb.tick, opts.player_delay_ms, demo_res.0.interval_per_tick());
+    let stick = crate::demo::delayed_tick(
+        pb.tick,
+        opts.player_delay_ms,
+        demo_res.0.interval_per_tick(),
+    );
     let Some(frame) = demo_res.0.frame_at(stick as u32) else {
         return;
     };
@@ -807,8 +833,14 @@ fn bars_around(outer: egui::Rect, inner: egui::Rect) -> [egui::Rect; 4] {
     [
         Rect::from_min_max(outer.min, pos2(outer.max.x, inner.min.y)), // top
         Rect::from_min_max(pos2(outer.min.x, inner.max.y), outer.max), // bottom
-        Rect::from_min_max(pos2(outer.min.x, inner.min.y), pos2(inner.min.x, inner.max.y)), // left
-        Rect::from_min_max(pos2(inner.max.x, inner.min.y), pos2(outer.max.x, inner.max.y)), // right
+        Rect::from_min_max(
+            pos2(outer.min.x, inner.min.y),
+            pos2(inner.min.x, inner.max.y),
+        ), // left
+        Rect::from_min_max(
+            pos2(inner.max.x, inner.min.y),
+            pos2(outer.max.x, inner.max.y),
+        ), // right
     ]
 }
 

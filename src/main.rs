@@ -1,8 +1,12 @@
 //! Native previewer: parse a TF2 demo, render the map GLB + players/projectiles at a
 //! tick, free-fly camera, scrub the timeline, author + export an HLAE campath.
 //!
-//! Usage: hlae-campath-previewer <demo.dem|-> [map.glb]
-//!   `-` reads the demo from stdin. Assets load relative to the `assets/` dir.
+//! Usage: hlae-campath-previewer <demo.dem|-> [map.glb] [--import <campath.xml>] [--data-dir <dir>]
+//!
+//!   Demo, map, and import paths resolve against the data dir (default
+//!   $XDG_DATA_HOME/hlae-campath-previewer, or ~/.local/share/hlae-campath-previewer,
+//!   overridden with --data-dir). Absolute paths and `-` (stdin) bypass it.
+//!   `--import` loads an existing campath XML on startup.
 //!
 //! Controls: RMB hold = mouselook, WASD/RF fly, Space = play/pause, arrows seek 50,
 //!           ,/. step 1 tick, +/- fly speed, B = toggle AABBs, Esc = quit
@@ -18,12 +22,14 @@ mod entities;
 mod map;
 mod ui;
 
+use std::path::{Path, PathBuf};
+
 use bevy::prelude::*;
 use clap::Parser;
 
 use app::AppPlugin;
 use camera::CameraPlugin;
-use campath::CampathPlugin;
+use campath::{CampathPlugin, ImportOnStartup};
 use demo::{ActiveDemo, DemoPath, DemoPlugin};
 use diagnostics::DiagnosticsPlugin;
 use entities::EntitiesPlugin;
@@ -34,25 +40,49 @@ use ui::UiPlugin;
 #[derive(Parser)]
 #[command(about, long_about = None)]
 struct Args {
-    /// Demo to load; `-` reads it from stdin.
-    #[arg(default_value = "assets/demo.dem")]
+    /// Demo to load (bare name resolves against --data-dir); `-` reads it from stdin.
+    #[arg(default_value = "demo.dem")]
     demo: String,
-    /// Map GLB to render; auto-resolved from the demo header if omitted.
+    /// Map GLB to render (bare name resolves against --data-dir); auto-resolved from
+    /// the demo header if omitted.
     map: Option<String>,
+    /// Campath XML to import on startup (e.g. one authored earlier for this demo).
+    #[arg(short, long, value_name = "XML")]
+    import: Option<PathBuf>,
+    /// Directory holding demos, map GLBs, and player models. Defaults to
+    /// $XDG_DATA_HOME/hlae-campath-previewer (or ~/.local/share/hlae-campath-previewer).
+    #[arg(long, value_name = "DIR")]
+    data_dir: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let demo_path = args.demo;
-    let map_arg = args.map;
 
-    // "-" reads the demo from stdin; give exports a sensible stem in that case since
+    // Canonicalize + create the data dir up front so Bevy's AssetPlugin can read it.
+    let data_dir = prepare_data_dir(args.data_dir.as_deref().unwrap_or(&default_data_dir()))?;
+
+    // Relative demo/map names resolve under the data dir; absolute paths and `-`
+    // (stdin) pass through untouched. --import is a user-authored XML, so it resolves
+    // normally against the cwd like any other CLI path.
+    let demo_path = resolve_in(&args.demo, &data_dir);
+    let import_path = args.import;
+
+    // `-` reads the demo from stdin; give exports a sensible stem in that case since
     // there's no filename to derive one from.
-    let export_stem = if demo_path == "-" { "campath".to_string() } else { demo_path.clone() };
-    let src_label = if demo_path == "-" { "<stdin>" } else { &demo_path };
+    let export_stem = if args.demo == "-" {
+        "campath".to_string()
+    } else {
+        demo_path.to_string_lossy().into_owned()
+    };
+    let src_label = if args.demo == "-" {
+        "<stdin>"
+    } else {
+        &args.demo
+    };
 
+    eprintln!("[previewer] data dir: {}", data_dir.display());
     eprintln!("[previewer] parsing {src_label} ...");
-    let bytes = demo::load_demo_bytes(&demo_path)?;
+    let bytes = demo::load_demo_bytes(&demo_path.to_string_lossy())?;
     let data = demo::parse(&bytes)?;
     eprintln!(
         "[previewer] parsed: {:.4}s/tick, max_tick={}, map={}, first_curtime_tick={}",
@@ -63,9 +93,10 @@ fn main() -> anyhow::Result<()> {
     );
 
     // Prefer an explicit CLI map; otherwise resolve one from the demo header against the
-    // GLBs in assets/, tolerating version suffixes. Fall back if nothing matches.
-    let map_asset = map_arg
-        .or_else(|| resolve_map_asset(data.map_name()))
+    // GLBs in the data dir, tolerating version suffixes. Fall back if nothing matches.
+    let map_asset = args
+        .map
+        .or_else(|| resolve_map_asset(data.map_name(), &data_dir))
         .unwrap_or_else(|| {
             eprintln!(
                 "[previewer] no map asset for '{}', rendering without geometry",
@@ -76,13 +107,22 @@ fn main() -> anyhow::Result<()> {
     eprintln!("[previewer] map asset: {map_asset}");
 
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "hlae-campath-previewer".into(),
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "hlae-campath-previewer".into(),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                // Mount maps/player models from the data dir instead of a hard-coded
+                // `assets/` next to the cwd.
+                .set(AssetPlugin {
+                    file_path: data_dir.to_string_lossy().into_owned(),
+                    ..default()
+                }),
+        )
         .insert_resource(ClearColor(Color::srgb(0.05, 0.06, 0.08)))
         // Untextured map surfaces facing away from the sun would be near-black; lift them.
         .insert_resource(AmbientLight {
@@ -92,6 +132,7 @@ fn main() -> anyhow::Result<()> {
         .insert_resource(DemoPath(export_stem))
         .insert_resource(MapAssetPath(map_asset))
         .insert_resource(ActiveDemo(Box::new(data)))
+        .insert_resource(ImportOnStartup(import_path))
         .add_plugins((
             MapPlugin,
             EntitiesPlugin,
@@ -107,25 +148,70 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Find the map GLB in `assets/` for the demo header's `map` name, tolerating version
+/// Default data dir: $XDG_DATA_HOME/hlae-campath-previewer, falling back to
+/// ~/.local/share/hlae-campath-previewer, and finally the in-tree `assets/` dir if
+/// neither env var is set (e.g. running as a service).
+fn default_data_dir() -> PathBuf {
+    fn nonempty_env(name: &str) -> Option<PathBuf> {
+        let v = std::env::var(name).ok()?;
+        (!v.is_empty()).then(|| PathBuf::from(v))
+    }
+
+    if let Some(xdg) = nonempty_env("XDG_DATA_HOME") {
+        return xdg.join("hlae-campath-previewer");
+    }
+    if let Some(home) = nonempty_env("HOME") {
+        return home.join(".local/share/hlae-campath-previewer");
+    }
+    PathBuf::from("assets")
+}
+
+/// Resolve `dir` to an absolute path and make sure it exists before Bevy's
+/// `AssetPlugin` reads it. Relative paths are resolved against the cwd first.
+fn prepare_data_dir(dir: &Path) -> anyhow::Result<PathBuf> {
+    let abs = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(dir)
+    };
+    std::fs::create_dir_all(&abs)?;
+    Ok(abs)
+}
+
+/// Resolve `input` against `data_dir`. `-` (stdin) and absolute paths pass through
+/// untouched; bare/relative names resolve under `data_dir` so `demo.dem` loads from
+/// `<data_dir>/demo.dem`.
+fn resolve_in(input: impl AsRef<Path>, data_dir: &Path) -> PathBuf {
+    let input = input.as_ref();
+    if input.as_os_str() == "-" {
+        return PathBuf::from("-");
+    }
+    if input.is_absolute() {
+        input.to_path_buf()
+    } else {
+        data_dir.join(input)
+    }
+}
+
+/// Find the map GLB in `data_dir` for the demo header's `map` name, tolerating version
 /// suffixes. An exact `<map>.glb` wins; otherwise the asset sharing the longest common
 /// prefix, but only if that prefix covers the base map name (everything before the
 /// trailing version token). So `koth_bagel_rc11` still finds `koth_bagel_rc12`, while
-/// `cp_process_f12` never grabs `cp_prolands_rc2ta`. Returns a name relative to assets/.
-fn resolve_map_asset(map: &str) -> Option<String> {
+/// `cp_process_f12` never grabs `cp_prolands_rc2ta`. Returns a name relative to data_dir.
+fn resolve_map_asset(map: &str, data_dir: &Path) -> Option<String> {
     if map.is_empty() {
         return None;
     }
     let exact = format!("{map}.glb");
 
-    let names: Vec<String> = std::fs::read_dir("assets")
+    let names: Vec<String> = std::fs::read_dir(data_dir)
         .ok()?
         .filter_map(|e| e.ok())
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|n| n.ends_with(".glb"))
         .collect();
 
-    if names.iter().any(|n| *n == exact) {
+    if names.contains(&exact) {
         return Some(exact);
     }
     best_prefix_match(map, &names)

@@ -76,13 +76,13 @@ fn projectiles_setup(
     let mut proj_oriented = Vec::with_capacity(8);
     for ty in 0..8u8 {
         let (mesh, oriented): (Mesh, bool) = match ty {
-            0 => (Capsule3d::new(3.0, 14.0).into(), true),  // rocket
-            1 => (Capsule3d::new(1.5, 30.0).into(), true),  // healing arrow
-            2 => (Sphere::new(5.0).into(), false),          // sticky
-            3 => (Sphere::new(5.0).into(), false),          // pipe
-            4 => (Sphere::new(3.5).into(), false),          // flare
-            5 => (Sphere::new(6.0).into(), false),          // loose cannon
-            _ => (Sphere::new(4.0).into(), false),          // unknown
+            0 => (Capsule3d::new(3.0, 14.0).into(), true), // rocket
+            1 => (Capsule3d::new(1.5, 30.0).into(), true), // healing arrow
+            2 => (Sphere::new(5.0).into(), false),         // sticky
+            3 => (Sphere::new(5.0).into(), false),         // pipe
+            4 => (Sphere::new(3.5).into(), false),         // flare
+            5 => (Sphere::new(6.0).into(), false),         // loose cannon
+            _ => (Sphere::new(4.0).into(), false),         // unknown
         };
         proj_mesh.push(meshes.add(mesh));
         proj_oriented.push(oriented);
@@ -106,8 +106,14 @@ fn projectiles_setup(
             ]
         } else {
             [
-                make(Color::srgb(1.0, 0.25, 0.2), LinearRgba::new(0.3, 0.05, 0.04, 1.0)),
-                make(Color::srgb(0.3, 0.5, 1.0), LinearRgba::new(0.04, 0.08, 0.3, 1.0)),
+                make(
+                    Color::srgb(1.0, 0.25, 0.2),
+                    LinearRgba::new(0.3, 0.05, 0.04, 1.0),
+                ),
+                make(
+                    Color::srgb(0.3, 0.5, 1.0),
+                    LinearRgba::new(0.04, 0.08, 0.3, 1.0),
+                ),
             ]
         };
         proj_mat.push(pair);
@@ -164,7 +170,11 @@ fn update_projectiles(
         &mut ProjectileModelState,
     )>,
 ) {
-    let stick = crate::demo::delayed_tick(pb.tick, opts.player_delay_ms, demo_res.0.interval_per_tick());
+    let stick = crate::demo::delayed_tick(
+        pb.tick,
+        opts.player_delay_ms,
+        demo_res.0.interval_per_tick(),
+    );
     let before = demo_res.0.frame_at(stick as u32);
     let after = pb
         .interpolate
@@ -187,7 +197,8 @@ fn update_projectiles(
         let mut pos = Vec3::from_array(pr.pos);
         let mut rot = pr.rotation;
         if t > 0.0 {
-            if let Some(np) = after.and_then(|a| a.projectiles.iter().find(|q| q.entity == pr.entity))
+            if let Some(np) =
+                after.and_then(|a| a.projectiles.iter().find(|q| q.entity == pr.entity))
             {
                 pos = pos.lerp(Vec3::from_array(np.pos), t);
                 for i in 0..3 {
@@ -201,7 +212,11 @@ fn update_projectiles(
             // long axis (+Y) along it.
             let pitch = rot[0].to_radians();
             let yaw = rot[1].to_radians();
-            let fwd = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), -pitch.sin());
+            let fwd = Vec3::new(
+                pitch.cos() * yaw.cos(),
+                pitch.cos() * yaw.sin(),
+                -pitch.sin(),
+            );
             Quat::from_rotation_arc(Vec3::Y, fwd.normalize_or_zero())
         } else {
             Quat::IDENTITY
@@ -251,10 +266,11 @@ fn draw_projectile_trails(pb: Res<Playback>, demo_res: Res<ActiveDemo>, mut gizm
     let mut trails: HashMap<u32, Vec<(u32, Vec3, u8)>> = HashMap::new();
     demo_res.0.frames_in_range(lo, cur, &mut |f| {
         for pr in &f.projectiles {
-            trails
-                .entry(pr.entity)
-                .or_default()
-                .push((f.tick, root_rot * Vec3::from_array(pr.pos), pr.team));
+            trails.entry(pr.entity).or_default().push((
+                f.tick,
+                root_rot * Vec3::from_array(pr.pos),
+                pr.team,
+            ));
         }
     });
 

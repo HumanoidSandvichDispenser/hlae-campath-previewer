@@ -165,7 +165,11 @@ pub fn from_hlae_campath_xml(
         },
     };
 
-    let per_tick = if interval_per_tick > 0.0 { interval_per_tick } else { 0.015 };
+    let per_tick = if interval_per_tick > 0.0 {
+        interval_per_tick
+    } else {
+        0.015
+    };
     let attr = |n: &roxmltree::Node, name: &str| -> anyhow::Result<f32> {
         n.attribute(name)
             .ok_or_else(|| anyhow::anyhow!("<p> missing '{name}'"))?
@@ -180,7 +184,12 @@ pub fn from_hlae_campath_xml(
         let server_tick = (t / per_tick).round() as i64;
         let demo_tick = server_to_demo(server_tick);
         // XML quaternion is Quake-local; rebase into our OpenGL-local convention.
-        let qh = Quat::from_xyzw(attr(&p, "qx")?, attr(&p, "qy")?, attr(&p, "qz")?, attr(&p, "qw")?);
+        let qh = Quat::from_xyzw(
+            attr(&p, "qx")?,
+            attr(&p, "qy")?,
+            attr(&p, "qz")?,
+            attr(&p, "qw")?,
+        );
         let q = qh * quake_to_opengl_basis().inverse();
         keyframes.push(Keyframe {
             id: 0,
@@ -239,7 +248,10 @@ mod tests {
 
         // t is engine curtime seconds = (demo tick + offset) * interval.
         let want_t = (148_000 + offset) as f32 * interval; // ~3549.99
-        assert!(xml.contains(&format!("t=\"{want_t:.6}\"")), "xml t mismatch:\n{xml}");
+        assert!(
+            xml.contains(&format!("t=\"{want_t:.6}\"")),
+            "xml t mismatch:\n{xml}"
+        );
 
         // Importing with the same offset recovers the original demo ticks.
         let (back, _) = from_hlae_campath_xml(&xml, interval, s2d).unwrap();
@@ -261,7 +273,12 @@ mod tests {
         );
 
         let (kfs, _) = from_hlae_campath_xml(&xml, 0.015, |s| s).unwrap();
-        let q = Quat::from_xyzw(kfs[0].quaternion[0], kfs[0].quaternion[1], kfs[0].quaternion[2], kfs[0].quaternion[3]);
+        let q = Quat::from_xyzw(
+            kfs[0].quaternion[0],
+            kfs[0].quaternion[1],
+            kfs[0].quaternion[2],
+            kfs[0].quaternion[3],
+        );
 
         // Our angle extraction on the rebased quaternion must recover HLAE's angles.
         let (pitch, yaw, roll) = source_angles_from_quaternion(q);
@@ -271,7 +288,13 @@ mod tests {
         assert!(norm(yaw - rz).abs() < 0.05, "yaw {yaw} vs {rz}");
 
         // Exporting it again reproduces the original HLAE quaternion (up to sign).
-        let kf = Keyframe { id: 1, tick: 0, position: [0.0; 3], quaternion: kfs[0].quaternion, fov: 90.0 };
+        let kf = Keyframe {
+            id: 1,
+            tick: 0,
+            position: [0.0; 3],
+            quaternion: kfs[0].quaternion,
+            fov: 90.0,
+        };
         let out = to_hlae_campath_xml(&[kf], &CampathInterp::default(), 0.015, |t| t as i64);
         let dot = qw.abs(); // sanity that the source value is what we expect
         assert!(dot > 0.0);

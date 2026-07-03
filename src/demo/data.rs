@@ -51,7 +51,7 @@ mod tests {
 
         let bytes = vec![0u8; 100];
         let demo = Demo::new(&bytes);
-        let _ = DemoParser::new_with_analyser(demo.get_stream(), GameStateAnalyser::default())
-            .ticker();
+        let _ =
+            DemoParser::new_with_analyser(demo.get_stream(), GameStateAnalyser::default()).ticker();
     }
 }

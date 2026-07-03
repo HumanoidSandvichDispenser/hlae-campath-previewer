@@ -16,10 +16,29 @@ pub struct CampathPlugin;
 impl Plugin for CampathPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Campath>()
+            .init_resource::<ImportOnStartup>()
+            .add_systems(Startup, campath_import_on_startup)
             .add_systems(Update, campath_input.in_set(AppSet::Input))
             .add_systems(Update, campath_recompile.in_set(AppSet::Playback))
             .add_systems(Update, campath_playback.in_set(AppSet::Sync))
             .add_systems(Update, draw_campath.in_set(AppSet::Draw));
+    }
+}
+
+/// A campath XML to load once at startup, set from the `--import` CLI flag. `None` skips it.
+#[derive(Resource, Default)]
+pub struct ImportOnStartup(pub Option<std::path::PathBuf>);
+
+/// If `--import` supplied a campath XML, load it into the `Campath` before the first frame.
+fn campath_import_on_startup(
+    req: Res<ImportOnStartup>,
+    demo_res: Res<ActiveDemo>,
+    mut path: ResMut<Campath>,
+) {
+    let Some(xml) = req.0.as_ref() else { return };
+    match import_campath(&mut path, xml, demo_res.0.as_ref()) {
+        Ok(n) => eprintln!("[campath] imported {n} keyframes from {}", xml.display()),
+        Err(e) => eprintln!("[campath] --import failed for {}: {e}", xml.display()),
     }
 }
 
@@ -54,11 +73,23 @@ impl Campath {
         self.dirty = true;
         if let Some(i) = self.keyframes.iter().position(|k| k.tick == tick) {
             let id = self.keyframes[i].id;
-            self.keyframes[i] = spline::Keyframe { id, tick, position, quaternion, fov };
+            self.keyframes[i] = spline::Keyframe {
+                id,
+                tick,
+                position,
+                quaternion,
+                fov,
+            };
             id
         } else {
             let id = self.alloc_id();
-            self.keyframes.push(spline::Keyframe { id, tick, position, quaternion, fov });
+            self.keyframes.push(spline::Keyframe {
+                id,
+                tick,
+                position,
+                quaternion,
+                fov,
+            });
             self.keyframes.sort_by_key(|k| k.tick);
             id
         }
@@ -215,9 +246,17 @@ pub(crate) fn export_campath(path: &Campath, demo_stem: &str, demo: &dyn DemoSou
     });
     let vdm = export::to_vdm(&path.keyframes, &xml_name);
     let cwd = std::env::current_dir().unwrap_or_default();
-    match (std::fs::write(&xml_name, xml), std::fs::write(&vdm_name, vdm)) {
+    match (
+        std::fs::write(&xml_name, xml),
+        std::fs::write(&vdm_name, vdm),
+    ) {
         (Ok(_), Ok(_)) => {
-            eprintln!("[campath] exported {} + {} to {}", xml_name, vdm_name, cwd.display())
+            eprintln!(
+                "[campath] exported {} + {} to {}",
+                xml_name,
+                vdm_name,
+                cwd.display()
+            )
         }
         (a, b) => eprintln!("[campath] export failed: {a:?} {b:?}"),
     }
@@ -229,10 +268,12 @@ pub(crate) fn export_xml_to(
     xml_path: &std::path::Path,
     demo: &dyn DemoSource,
 ) -> std::io::Result<()> {
-    let xml =
-        export::to_hlae_campath_xml(&path.keyframes, &path.interp, demo.interval_per_tick(), |t| {
-            demo.demo_to_server_tick(t as i64)
-        });
+    let xml = export::to_hlae_campath_xml(
+        &path.keyframes,
+        &path.interp,
+        demo.interval_per_tick(),
+        |t| demo.demo_to_server_tick(t as i64),
+    );
     std::fs::write(xml_path, xml)
 }
 
@@ -254,10 +295,9 @@ pub(crate) fn import_campath(
     demo: &dyn DemoSource,
 ) -> anyhow::Result<usize> {
     let xml = std::fs::read_to_string(xml_path)?;
-    let (keyframes, interp) =
-        export::from_hlae_campath_xml(&xml, demo.interval_per_tick(), |s| {
-            demo.server_to_demo_tick(s)
-        })?;
+    let (keyframes, interp) = export::from_hlae_campath_xml(&xml, demo.interval_per_tick(), |s| {
+        demo.server_to_demo_tick(s)
+    })?;
     let n = keyframes.len();
     path.load_imported(keyframes, interp);
     Ok(n)
@@ -321,7 +361,12 @@ fn draw_campath(path: Res<Campath>, opts: Res<crate::ui::ViewOptions>, mut gizmo
     }
     for kf in &path.keyframes {
         let p = r * Vec3::from_array(kf.position);
-        let q = r * Quat::from_xyzw(kf.quaternion[0], kf.quaternion[1], kf.quaternion[2], kf.quaternion[3]);
+        let q = r * Quat::from_xyzw(
+            kf.quaternion[0],
+            kf.quaternion[1],
+            kf.quaternion[2],
+            kf.quaternion[3],
+        );
         draw_frustum(&mut gizmos, p, q, Color::srgb(1.0, 0.4, 0.9));
     }
 }
@@ -353,7 +398,11 @@ fn draw_frustum(gizmos: &mut Gizmos, p: Vec3, q: Quat, color: Color) {
     }
     // Up indicator: a small marker at the top edge so orientation reads at a glance.
     let top_mid = (corners[0] + corners[1]) * 0.5;
-    gizmos.line(top_mid, top_mid + up * HALF_H * 0.5, Color::srgb(0.3, 0.9, 1.0));
+    gizmos.line(
+        top_mid,
+        top_mid + up * HALF_H * 0.5,
+        Color::srgb(0.3, 0.9, 1.0),
+    );
 }
 
 #[cfg(test)]

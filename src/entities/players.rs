@@ -116,7 +116,11 @@ fn update_players(
         &mut ModelState,
     )>,
 ) {
-    let stick = crate::demo::delayed_tick(pb.tick, opts.player_delay_ms, demo_res.0.interval_per_tick());
+    let stick = crate::demo::delayed_tick(
+        pb.tick,
+        opts.player_delay_ms,
+        demo_res.0.interval_per_tick(),
+    );
     let before = demo_res.0.frame_at(stick as u32);
     let after = pb
         .interpolate
@@ -237,10 +241,14 @@ fn fade_dead_players(
 ) {
     let frame = demo_res.0.frame_at(pb.tick as u32);
     let players = frame.map(|f| f.players.as_slice()).unwrap_or(&[]);
-    let fade_ticks = (1.0 / demo_res.0.interval_per_tick().max(0.001)).round().max(1.0);
+    let fade_ticks = (1.0 / demo_res.0.interval_per_tick().max(0.001))
+        .round()
+        .max(1.0);
 
     for (slot, mut vis, mut ms) in &mut rigs {
-        let Some(p) = players.get(slot.0) else { continue };
+        let Some(p) = players.get(slot.0) else {
+            continue;
+        };
         if ms.mats.is_empty() {
             continue;
         }

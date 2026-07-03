@@ -450,8 +450,13 @@ impl QSpline {
                 klo = k;
             }
         }
-        let (a0, a1, a2) =
-            slew3_coeffs(self.dtheta[klo], self.h[klo], self.e[klo], self.w[klo], self.w[klo + 1]);
+        let (a0, a1, a2) = slew3_coeffs(
+            self.dtheta[klo],
+            self.h[klo],
+            self.e[klo],
+            self.w[klo],
+            self.w[klo + 1],
+        );
         slew3_quat(xi - self.x[klo], self.h[klo], &self.y[klo], a0, a1, a2)
     }
 }
@@ -559,12 +564,14 @@ impl CompiledCampath {
 
     fn eval_rotation(&self, t: f64) -> Quat {
         let n = self.count;
-        let q = |i: usize| Quat::from_xyzw(
-            self.quats[i][0] as f32,
-            self.quats[i][1] as f32,
-            self.quats[i][2] as f32,
-            self.quats[i][3] as f32,
-        );
+        let q = |i: usize| {
+            Quat::from_xyzw(
+                self.quats[i][0] as f32,
+                self.quats[i][1] as f32,
+                self.quats[i][2] as f32,
+                self.quats[i][3] as f32,
+            )
+        };
         if t <= self.t[0] {
             return q(0);
         }

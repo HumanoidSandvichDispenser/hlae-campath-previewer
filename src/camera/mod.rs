@@ -107,8 +107,12 @@ fn camera_setup(mut commands: Commands, demo_res: Res<ActiveDemo>) {
 /// Keep the camera viewport at the largest 16:9 rect that fits the window,
 /// centered with letterbox/pillarbox bars filled by the clear color.
 fn enforce_16_9_viewport(windows: Query<&Window>, mut cam_q: Query<&mut Camera, With<FlyCam>>) {
-    let Ok(window) = windows.get_single() else { return };
-    let Ok(mut camera) = cam_q.get_single_mut() else { return };
+    let Ok(window) = windows.get_single() else {
+        return;
+    };
+    let Ok(mut camera) = cam_q.get_single_mut() else {
+        return;
+    };
     let w = window.physical_width();
     let h = window.physical_height();
     if w == 0 || h == 0 {

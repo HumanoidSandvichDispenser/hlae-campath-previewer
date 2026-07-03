@@ -31,7 +31,11 @@ pub(crate) fn interp_fraction(
 /// to the first tick so early frames don't underflow. The camera never uses this.
 pub(crate) fn delayed_tick(tick: f32, delay_ms: f32, interval_s: f32) -> f32 {
     let per_tick_ms = interval_s * 1000.0;
-    let dt = if per_tick_ms > 0.0 { delay_ms / per_tick_ms } else { 0.0 };
+    let dt = if per_tick_ms > 0.0 {
+        delay_ms / per_tick_ms
+    } else {
+        0.0
+    };
     (tick - dt).max(1.0)
 }
 
@@ -80,7 +84,9 @@ impl Plugin for DemoPlugin {
         // Apply seeks before advancing so a seek lands on its exact target tick.
         .add_systems(
             Update,
-            (handle_seek, advance_playback).chain().in_set(AppSet::Playback),
+            (handle_seek, advance_playback)
+                .chain()
+                .in_set(AppSet::Playback),
         );
     }
 }
@@ -107,11 +113,7 @@ fn playback_input(
     }
 }
 
-fn handle_seek(
-    mut ev: EventReader<SeekTo>,
-    mut pb: ResMut<Playback>,
-    demo_res: Res<ActiveDemo>,
-) {
+fn handle_seek(mut ev: EventReader<SeekTo>, mut pb: ResMut<Playback>, demo_res: Res<ActiveDemo>) {
     let max = demo_res.0.max_tick() as f32;
     for e in ev.read() {
         pb.tick = e.0.clamp(1.0, max);
